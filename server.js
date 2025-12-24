@@ -10,7 +10,7 @@ import { v4 as uuidv4 } from "uuid";
 dotenv.config();
 
 // 🔒 CONFIGURATION
-const ALLOWED_NUMBER = "+972548498889"; 
+const ALLOWED_NUMBER = "+972554402506"; 
 const PORT = process.env.PORT || 3000;
 
 // 🌍 AUTO-DETECT URL
