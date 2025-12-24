@@ -1,0 +1,16 @@
+# Dependencies
+node_modules/
+
+# Environment variables (SECURITY RISK if you upload this!)
+.env
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Logs
+npm-debug.log*
+
+# Downloaded music files (keep your repo clean)
+*.mp3
+public/*.mp3
