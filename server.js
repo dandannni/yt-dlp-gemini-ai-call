@@ -47,13 +47,21 @@ app.get("/music/:filename", (req, res) => {
     else res.status(404).send("File not found");
 });
 
-// 🧠 SESSION STORAGE (Chat + Music History)
-// Structure: callSid -> { gemini: chatObj, history: [{title, url}], index: number }
+// 🧠 SESSION STORAGE
 const sessions = new Map();
 
-// ---------------------------------------------------------
+function getSession(callSid) {
+    if (!sessions.has(callSid)) {
+        sessions.set(callSid, {
+            gemini: model.startChat({ history: [] }),
+            history: [], 
+            index: -1    
+        });
+    }
+    return sessions.get(callSid);
+}
+
 // 🎵 HELPER: DOWNLOAD SONG
-// ---------------------------------------------------------
 async function downloadSong(query) {
     console.log(`🎵 Searching: ${query}...`);
     const uniqueId = uuidv4();
@@ -78,20 +86,6 @@ async function downloadSong(query) {
 }
 
 // ---------------------------------------------------------
-// 🛠️ HELPER: INIT SESSION
-// ---------------------------------------------------------
-function getSession(callSid) {
-    if (!sessions.has(callSid)) {
-        sessions.set(callSid, {
-            gemini: model.startChat({ history: [] }),
-            history: [], // Stores list of songs
-            index: -1    // Current song position
-        });
-    }
-    return sessions.get(callSid);
-}
-
-// ---------------------------------------------------------
 // 📞 ROUTE 1: START / RESET
 // ---------------------------------------------------------
 app.post("/twiml", (req, res) => {
@@ -103,9 +97,8 @@ app.post("/twiml", (req, res) => {
         return res.type("text/xml").send(r.toString());
     }
 
-    // Reset everything on new call or '0'
     sessions.delete(req.body.CallSid);
-    getSession(req.body.CallSid); // Init new session
+    getSession(req.body.CallSid); 
 
     const response = new VoiceResponse();
     response.say("Main Menu. Ask me anything, or press Pound for music.");
@@ -113,6 +106,7 @@ app.post("/twiml", (req, res) => {
     response.gather({
         input: "speech dtmf",
         numDigits: 1,
+        finishOnKey: "", // 🔴 THIS FIXES THE CRASH (Allows # to be a digit)
         action: "/main-gather",
         method: "POST",
         timeout: 5,
@@ -132,6 +126,7 @@ app.post("/main-gather", async (req, res) => {
     const userText = req.body.SpeechResult;
     const session = getSession(callSid);
 
+    // 🔴 Handle # or 0
     if (digits === "0") {
         response.redirect("/twiml");
         return res.type("text/xml").send(response.toString());
@@ -142,7 +137,13 @@ app.post("/main-gather", async (req, res) => {
     }
 
     if (!userText) {
-        response.gather({ input: "speech dtmf", numDigits: 1, action: "/main-gather" });
+        // Listen again if silence
+        response.gather({ 
+            input: "speech dtmf", 
+            numDigits: 1, 
+            finishOnKey: "", // 🔴 Keep consistent
+            action: "/main-gather" 
+        });
         return res.type("text/xml").send(response.toString());
     }
 
@@ -154,7 +155,12 @@ app.post("/main-gather", async (req, res) => {
         response.say("Error.");
     }
 
-    response.gather({ input: "speech dtmf", numDigits: 1, action: "/main-gather" });
+    response.gather({ 
+        input: "speech dtmf", 
+        numDigits: 1, 
+        finishOnKey: "", 
+        action: "/main-gather" 
+    });
     res.type("text/xml").send(response.toString());
 });
 
@@ -167,11 +173,11 @@ app.post("/music-mode", (req, res) => {
     const gather = response.gather({
         input: "speech dtmf",
         numDigits: 1,
+        finishOnKey: "", 
         action: "/music-process", 
         timeout: 5,
         bargeIn: true
     });
-    // 🗣️ SPOKEN MESSAGE ADDED HERE
     gather.say("What song do you want to hear?"); 
 
     res.type("text/xml").send(response.toString());
@@ -217,29 +223,38 @@ app.post("/music-process", async (req, res) => {
         const song = session.history[session.index];
         response.say(`Playing ${song.title}`);
         
-        const gather = response.gather({ input: "dtmf", numDigits: 1, action: "/music-process" });
+        // Allow interruption during play
+        const gather = response.gather({ 
+            input: "dtmf", 
+            numDigits: 1, 
+            finishOnKey: "", 
+            action: "/music-process" 
+        });
         gather.play(song.url);
         
-        response.redirect("/music-mode"); // Loop when done
+        response.redirect("/music-mode"); 
         return res.type("text/xml").send(response.toString());
     }
 
-    // 🔍 NEW SONG SEARCH (Voice Input)
+    // 🔍 NEW SONG SEARCH
     if (userText) {
         try {
             const songData = await downloadSong(userText);
             
-            // Add to history
             session.history.push(songData);
-            session.index = session.history.length - 1; // Move pointer to end
+            session.index = session.history.length - 1; 
 
             response.say(`Playing ${userText}`);
             
-            // Allow interruption with 4, 5, 6, 0 during play
-            const gather = response.gather({ input: "dtmf", numDigits: 1, action: "/music-process" });
+            const gather = response.gather({ 
+                input: "dtmf", 
+                numDigits: 1, 
+                finishOnKey: "", 
+                action: "/music-process" 
+            });
             gather.play(songData.url);
 
-            response.redirect("/music-mode"); // Loop when done
+            response.redirect("/music-mode"); 
 
         } catch (err) {
             console.error(err);
@@ -249,7 +264,6 @@ app.post("/music-process", async (req, res) => {
         return res.type("text/xml").send(response.toString());
     }
 
-    // If nothing heard
     response.say("I didn't hear that.");
     response.redirect("/music-mode");
     res.type("text/xml").send(response.toString());
