@@ -71,25 +71,25 @@ function getSession(callSid) {
 // ---------------------------------------------------------
 // 🎵 HELPER: DOWNLOAD SONG (Fixed Command)
 // ---------------------------------------------------------
+// ---------------------------------------------------------
+// 🎵 HELPER: DOWNLOAD SONG (Fixed for Render Blocking)
+// ---------------------------------------------------------
 async function downloadSong(query) {
     console.log(`🎵 Searching: "${query}"...`);
     const uniqueId = uuidv4();
     const filename = `${uniqueId}.mp3`;
     const outputTemplate = path.join(DOWNLOAD_DIR, `${uniqueId}.%(ext)s`);
 
-    // 🛠️ CONFIGURATION FOR RENDER
-    // 1. ytsearch1: = Search and download FIRST result
-    // 2. --no-playlist = Don't download full playlists
-    // 3. --force-ipv4 = Fixes some network issues
-    // 4. --user-agent = Pretends to be a browser to avoid blocking
-    const command = `yt-dlp "ytsearch1:${query}" -x --audio-format mp3 --no-playlist --force-ipv4 --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36" -o "${outputTemplate}"`;
+    // 🛠️ FIX: Use Android Client to bypass "Sign in to confirm not a bot"
+    // We removed the generic "Mozilla" user-agent and used the internal Android API instead.
+    const command = `yt-dlp "ytsearch1:${query}" -x --audio-format mp3 --no-playlist --force-ipv4 --extractor-args "youtube:player_client=android" -o "${outputTemplate}"`;
 
     console.log(`🚀 Running: ${command}`);
 
     return new Promise((resolve, reject) => {
-        exec(command, { timeout: 30000 }, (error, stdout, stderr) => {
+        exec(command, { timeout: 40000 }, (error, stdout, stderr) => {
             if (error) {
-                console.error("🚨 Download Error:");
+                console.error("🚨 Download Error (Details):");
                 console.error(stderr);
                 return reject(error);
             }
@@ -101,7 +101,6 @@ async function downloadSong(query) {
         });
     });
 }
-
 // ---------------------------------------------------------
 // 📞 ROUTE 1: START / RESET
 // ---------------------------------------------------------
