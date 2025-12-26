@@ -15,10 +15,10 @@ dotenv.config();
 // Put the phone numbers inside the quotes (e.g., "+972500000000")
 const VERIFIED_CALLERS = [
     "+972548498889",  // Your Number
-    "",               // Caller 2
-    "",               // Caller 3
-    "",               // Caller 4
-    "",               // Caller 5
+    "+972554402506",               // Caller 2
+    "+972525585720",               // Caller 3
+    "+972528263032",               // Caller 4
+    "+972583230268",               // Caller 5
     ""                // Caller 6
 ].filter(num => num !== ""); // This removes empty lines automatically
 
