@@ -12,15 +12,14 @@ dotenv.config();
 // ---------------------------------------------------------
 // 🔒 CONFIGURATION: VERIFIED CALLERS
 // ---------------------------------------------------------
-// Put the phone numbers inside the quotes (e.g., "+972500000000")
 const VERIFIED_CALLERS = [
     "+972548498889",  // Your Number
-    "+972554402506",               // Caller 2
-    "+972525585720",               // Caller 3
-    "+972528263032",               // Caller 4
-    "+972583230268",               // Caller 5
-    ""                // Caller 6
-].filter(num => num !== ""); // This removes empty lines automatically
+    "+972554402506",  // Caller 2
+    "+972525585720",  // Caller 3
+    "+972528263032",  // Caller 4
+    "+972583230268",  // Caller 5
+    ""                // Caller 6 (Empty is ignored)
+].filter(num => num !== "");
 
 const PORT = process.env.PORT || 3000;
 const BASE_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
@@ -50,29 +49,26 @@ app.get("/music/:filename", (req, res) => {
     if (fs.existsSync(filePath)) {
         res.sendFile(filePath);
     } else {
-        res.status(404).send("File not found");
+        res.status(404).send("File deleted or not found");
     }
 });
 
-// 🧠 SESSION STORAGE
+// 🧠 SESSION STORAGE (Stores Chat + Music History)
 const sessions = new Map();
 
 function getSession(callSid) {
     if (!sessions.has(callSid)) {
         sessions.set(callSid, {
             gemini: model.startChat({ history: [] }),
-            history: [], 
-            index: -1    
+            history: [], // List of songs played
+            index: -1    // Current song position
         });
     }
     return sessions.get(callSid);
 }
 
 // ---------------------------------------------------------
-// 🎵 HELPER: DOWNLOAD SONG (Fixed Command)
-// ---------------------------------------------------------
-// ---------------------------------------------------------
-// 🎵 HELPER: DOWNLOAD SONG (Fixed for Render Blocking)
+// 🎵 HELPER: DOWNLOAD SONG (With Auto-Delete)
 // ---------------------------------------------------------
 async function downloadSong(query) {
     console.log(`🎵 Searching: "${query}"...`);
@@ -80,8 +76,7 @@ async function downloadSong(query) {
     const filename = `${uniqueId}.mp3`;
     const outputTemplate = path.join(DOWNLOAD_DIR, `${uniqueId}.%(ext)s`);
 
-    // 🛠️ FIX: Use Android Client to bypass "Sign in to confirm not a bot"
-    // We removed the generic "Mozilla" user-agent and used the internal Android API instead.
+    // Android Client Command (Bypasses Bot Check)
     const command = `yt-dlp "ytsearch1:${query}" -x --audio-format mp3 --no-playlist --force-ipv4 --extractor-args "youtube:player_client=android" -o "${outputTemplate}"`;
 
     console.log(`🚀 Running: ${command}`);
@@ -89,10 +84,22 @@ async function downloadSong(query) {
     return new Promise((resolve, reject) => {
         exec(command, { timeout: 40000 }, (error, stdout, stderr) => {
             if (error) {
-                console.error("🚨 Download Error (Details):");
+                console.error("🚨 Download Error:");
                 console.error(stderr);
                 return reject(error);
             }
+
+            // 🗑️ AUTO-DELETE: Deletes file after 10 minutes
+            const filePath = path.join(DOWNLOAD_DIR, filename);
+            setTimeout(() => {
+                if (fs.existsSync(filePath)) {
+                    fs.unlink(filePath, (err) => {
+                        if (err) console.error("Error deleting file:", err);
+                        else console.log(`🗑️ Auto-deleted: ${filename}`);
+                    });
+                }
+            }, 600000); 
+
             console.log("✅ Download complete");
             resolve({
                 title: query,
@@ -101,6 +108,7 @@ async function downloadSong(query) {
         });
     });
 }
+
 // ---------------------------------------------------------
 // 📞 ROUTE 1: START / RESET
 // ---------------------------------------------------------
@@ -126,7 +134,7 @@ app.post("/twiml", (req, res) => {
     response.gather({
         input: "speech dtmf",
         numDigits: 1,
-        finishOnKey: "", // Fix for # key
+        finishOnKey: "", 
         action: "/main-gather",
         method: "POST",
         timeout: 5,
@@ -194,7 +202,7 @@ app.post("/music-mode", (req, res) => {
 });
 
 // ---------------------------------------------------------
-// 🎵 ROUTE 4: MUSIC PROCESS (NO AI HERE)
+// 🎵 ROUTE 4: MUSIC PROCESS (Controls + Download)
 // ---------------------------------------------------------
 app.post("/music-process", async (req, res) => {
     const response = new VoiceResponse();
@@ -204,13 +212,13 @@ app.post("/music-process", async (req, res) => {
     
     const session = getSession(callSid);
 
-    // 🛑 RESET
+    // 🛑 RESET (0)
     if (digits === "0") {
         response.redirect("/twiml");
         return res.type("text/xml").send(response.toString());
     }
 
-    // 🕹️ CONTROLS: 4 (Back), 5 (Replay), 6 (Next)
+    // 🕹️ HISTORY CONTROLS: 4 (Back), 5 (Replay), 6 (Next)
     if (["4", "5", "6"].includes(digits)) {
         
         if (session.history.length === 0) {
@@ -219,6 +227,7 @@ app.post("/music-process", async (req, res) => {
             return res.type("text/xml").send(response.toString());
         }
 
+        // Logic to move the index pointer
         if (digits === "4") { // BACK
             if (session.index > 0) session.index--; 
             else response.say("First song.");
@@ -227,11 +236,13 @@ app.post("/music-process", async (req, res) => {
             if (session.index < session.history.length - 1) session.index++; 
             else response.say("Last song.");
         }
-        // 5 = Replay (just plays current index)
+        // 5 falls through here (index doesn't change = Replay)
 
+        // Play the song at the current index
         const song = session.history[session.index];
         response.say(`Playing ${song.title}`);
         
+        // Use <Gather> around <Play> so you can interrupt with 4,5,6 again
         const gather = response.gather({ input: "dtmf", numDigits: 1, finishOnKey: "", action: "/music-process" });
         gather.play(song.url);
         
@@ -239,15 +250,14 @@ app.post("/music-process", async (req, res) => {
         return res.type("text/xml").send(response.toString());
     }
 
-    // 🔍 DIRECT SEARCH (Raw Text -> yt-dlp)
+    // 🔍 DIRECT SEARCH (Voice -> Download)
     if (userText) {
         try {
-            // Pass the exact spoken text to yt-dlp
             const songData = await downloadSong(userText);
             
-            // Add to history
+            // Add new song to history list
             session.history.push(songData);
-            session.index = session.history.length - 1; 
+            session.index = session.history.length - 1; // Set pointer to newest song
 
             response.say(`Playing ${userText}`);
             
