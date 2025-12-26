@@ -2,7 +2,6 @@ import express from "express";
 import dotenv from "dotenv";
 import twilio from "twilio";
 import { GoogleGenerativeAI } from "@google/generative-ai";
-import OpenAI from "openai"; 
 import path from "path";
 import fs from "fs";
 import { exec } from "child_process";
@@ -10,8 +9,19 @@ import { v4 as uuidv4 } from "uuid";
 
 dotenv.config();
 
-// 🔒 CONFIGURATION
-const ALLOWED_NUMBER = "+972554402506"; 
+// ---------------------------------------------------------
+// 🔒 CONFIGURATION: VERIFIED CALLERS
+// ---------------------------------------------------------
+// Put the phone numbers inside the quotes (e.g., "+972500000000")
+const VERIFIED_CALLERS = [
+    "+972548498889",  // Your Number
+    "",               // Caller 2
+    "",               // Caller 3
+    "",               // Caller 4
+    "",               // Caller 5
+    ""                // Caller 6
+].filter(num => num !== ""); // This removes empty lines automatically
+
 const PORT = process.env.PORT || 3000;
 const BASE_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
 const DOWNLOAD_DIR = "/tmp"; 
@@ -23,17 +33,11 @@ process.on("unhandledRejection", err => console.error("UNHANDLED:", err));
 const { twiml } = twilio;
 const VoiceResponse = twiml.VoiceResponse;
 
-// 🤖 1. SETUP GEMINI
+// 🤖 GEMINI SETUP (Only for Main Chat)
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const model = genAI.getGenerativeModel({
     model: "gemini-2.5-flash", 
     systemInstruction: "You are a helpful phone assistant. Keep answers short. If user asks for music, say 'Press hash'.",
-    tools: [{ googleSearch: {} }]
-});
-
-// 🤖 2. SETUP OPENAI (Backup)
-const openai = new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY, 
 });
 
 const app = express();
@@ -44,10 +48,8 @@ app.use(express.json());
 app.get("/music/:filename", (req, res) => {
     const filePath = path.join(DOWNLOAD_DIR, req.params.filename);
     if (fs.existsSync(filePath)) {
-        console.log(`📂 Serving file: ${filePath}`); // Log when Twilio grabs the file
         res.sendFile(filePath);
     } else {
-        console.error(`❌ File missing: ${filePath}`);
         res.status(404).send("File not found");
     }
 });
@@ -67,34 +69,31 @@ function getSession(callSid) {
 }
 
 // ---------------------------------------------------------
-// 🎵 HELPER: DOWNLOAD SONG (WITH DEBUGGING)
+// 🎵 HELPER: DOWNLOAD SONG (Fixed Command)
 // ---------------------------------------------------------
 async function downloadSong(query) {
-    console.log(`🎵 Searching for: "${query}"...`);
+    console.log(`🎵 Searching: "${query}"...`);
     const uniqueId = uuidv4();
     const filename = `${uniqueId}.mp3`;
     const outputTemplate = path.join(DOWNLOAD_DIR, `${uniqueId}.%(ext)s`);
 
-    // 🛠️ CHANGED: Increased timeout to 30s and forced IPv4
-    const command = `yt-dlp "ytsearch1:${query}" -x --audio-format mp3 --no-playlist --force-ipv4 -o "${outputTemplate}"`;
+    // 🛠️ CONFIGURATION FOR RENDER
+    // 1. ytsearch1: = Search and download FIRST result
+    // 2. --no-playlist = Don't download full playlists
+    // 3. --force-ipv4 = Fixes some network issues
+    // 4. --user-agent = Pretends to be a browser to avoid blocking
+    const command = `yt-dlp "ytsearch1:${query}" -x --audio-format mp3 --no-playlist --force-ipv4 --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36" -o "${outputTemplate}"`;
 
-    console.log(`🚀 Executing Command: ${command}`);
+    console.log(`🚀 Running: ${command}`);
 
     return new Promise((resolve, reject) => {
         exec(command, { timeout: 30000 }, (error, stdout, stderr) => {
             if (error) {
-                console.error("🚨 DOWNLOAD ERROR 🚨");
-                console.error("------------------------------------------------");
-                console.error("1. Error Message:", error.message);
-                console.error("2. STDERR (What went wrong):", stderr);
-                console.error("3. STDOUT:", stdout);
-                console.error("------------------------------------------------");
+                console.error("🚨 Download Error:");
+                console.error(stderr);
                 return reject(error);
             }
-            
-            // Success
-            console.log("✅ Download finished successfully.");
-            console.log(`💾 Saved to: ${outputTemplate}`);
+            console.log("✅ Download complete");
             resolve({
                 title: query,
                 url: `${BASE_URL}/music/${filename}`
@@ -107,25 +106,28 @@ async function downloadSong(query) {
 // 📞 ROUTE 1: START / RESET
 // ---------------------------------------------------------
 app.post("/twiml", (req, res) => {
-    console.log("📞 Incoming Call / Reset");
+    const caller = req.body.From;
+    console.log(`📞 Incoming Call from: ${caller}`);
 
-    if (req.body.From !== ALLOWED_NUMBER) {
-        console.log(`⛔ Blocked call from: ${req.body.From}`);
+    // 🔒 SECURITY CHECK
+    if (!VERIFIED_CALLERS.includes(caller)) {
+        console.log("⛔ Unverified Caller - Rejecting");
         const r = new VoiceResponse();
         r.reject();
         return res.type("text/xml").send(r.toString());
     }
 
+    // Reset Session
     sessions.delete(req.body.CallSid);
     getSession(req.body.CallSid); 
 
     const response = new VoiceResponse();
-    response.say("Main Menu. Ask me anything, or press Pound for music.");
+    response.say("Connected. Ask Gemini, or press Pound for music.");
 
     response.gather({
         input: "speech dtmf",
         numDigits: 1,
-        finishOnKey: "", 
+        finishOnKey: "", // Fix for # key
         action: "/main-gather",
         method: "POST",
         timeout: 5,
@@ -136,7 +138,7 @@ app.post("/twiml", (req, res) => {
 });
 
 // ---------------------------------------------------------
-// 📞 ROUTE 2: MAIN MENU
+// 📞 ROUTE 2: MAIN MENU (Gemini Only)
 // ---------------------------------------------------------
 app.post("/main-gather", async (req, res) => {
     const response = new VoiceResponse();
@@ -145,6 +147,7 @@ app.post("/main-gather", async (req, res) => {
     const userText = req.body.SpeechResult;
     const session = getSession(callSid);
 
+    // 🔴 Switch Modes
     if (digits === "0") {
         response.redirect("/twiml");
         return res.type("text/xml").send(response.toString());
@@ -159,31 +162,13 @@ app.post("/main-gather", async (req, res) => {
         return res.type("text/xml").send(response.toString());
     }
 
-    // AI LOGIC
+    // 🤖 Gemini Logic
     try {
-        console.log(`💬 Gemini User: ${userText}`);
         const result = await session.gemini.sendMessage(userText);
         response.say(result.response.text());
-
-    } catch (geminiError) {
-        console.error("⚠️ Gemini Failed:", geminiError.message);
-        console.log("🔄 Switching to Backup (OpenAI)...");
-
-        try {
-            const completion = await openai.chat.completions.create({
-                messages: [
-                    { role: "system", content: "You are a helpful phone assistant. Keep answers short." },
-                    { role: "user", content: userText }
-                ],
-                model: "gpt-4o-mini", 
-            });
-            const backupReply = completion.choices[0].message.content;
-            response.say(backupReply);
-
-        } catch (openaiError) {
-            console.error("❌ Both AIs failed:", openaiError.message);
-            response.say("Sorry, I am having trouble connecting to the brain.");
-        }
+    } catch (e) {
+        console.error("Gemini Error:", e);
+        response.say("Gemini is not responding.");
     }
 
     response.gather({ input: "speech dtmf", numDigits: 1, finishOnKey: "", action: "/main-gather" });
@@ -210,36 +195,40 @@ app.post("/music-mode", (req, res) => {
 });
 
 // ---------------------------------------------------------
-// 🎵 ROUTE 4: MUSIC PROCESS
+// 🎵 ROUTE 4: MUSIC PROCESS (NO AI HERE)
 // ---------------------------------------------------------
 app.post("/music-process", async (req, res) => {
     const response = new VoiceResponse();
     const callSid = req.body.CallSid;
     const digits = req.body.Digits;
     const userText = req.body.SpeechResult;
+    
     const session = getSession(callSid);
 
+    // 🛑 RESET
     if (digits === "0") {
         response.redirect("/twiml");
         return res.type("text/xml").send(response.toString());
     }
 
-    // CONTROLS
+    // 🕹️ CONTROLS: 4 (Back), 5 (Replay), 6 (Next)
     if (["4", "5", "6"].includes(digits)) {
+        
         if (session.history.length === 0) {
-            response.say("No history yet. Say a song name.");
+            response.say("History empty. Say a song name.");
             response.redirect("/music-mode");
             return res.type("text/xml").send(response.toString());
         }
 
-        if (digits === "4") {
+        if (digits === "4") { // BACK
             if (session.index > 0) session.index--; 
             else response.say("First song.");
         }
-        else if (digits === "6") {
+        else if (digits === "6") { // NEXT
             if (session.index < session.history.length - 1) session.index++; 
-            else response.say("Latest song.");
+            else response.say("Last song.");
         }
+        // 5 = Replay (just plays current index)
 
         const song = session.history[session.index];
         response.say(`Playing ${song.title}`);
@@ -251,11 +240,13 @@ app.post("/music-process", async (req, res) => {
         return res.type("text/xml").send(response.toString());
     }
 
-    // NEW SONG
+    // 🔍 DIRECT SEARCH (Raw Text -> yt-dlp)
     if (userText) {
         try {
+            // Pass the exact spoken text to yt-dlp
             const songData = await downloadSong(userText);
             
+            // Add to history
             session.history.push(songData);
             session.index = session.history.length - 1; 
 
@@ -267,15 +258,14 @@ app.post("/music-process", async (req, res) => {
             response.redirect("/music-mode"); 
 
         } catch (err) {
-            console.error("❌ Music Processing Error:", err);
-            // We do NOT crash the call, we just say sorry
-            response.say("I had a problem downloading that specific song. Please try a different one.");
+            console.error("Music Error:", err);
+            response.say("Download failed. Try another song.");
             response.redirect("/music-mode");
         }
         return res.type("text/xml").send(response.toString());
     }
 
-    response.say("I didn't hear that.");
+    response.say("Say a song name.");
     response.redirect("/music-mode");
     res.type("text/xml").send(response.toString());
 });
