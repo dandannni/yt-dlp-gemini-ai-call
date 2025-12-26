@@ -10,15 +10,48 @@ import { v4 as uuidv4 } from "uuid";
 dotenv.config();
 
 // ---------------------------------------------------------
+// 🍪 SETUP COOKIES (THE FIX FOR BLOCKED DOWNLOADS)
+// ---------------------------------------------------------
+// We write the cookies from the Environment Variable to a temporary file
+const COOKIE_PATH = "/tmp/cookies.txt";
+
+if (process.env.YOUTUBE_COOKIES) {
+    try {
+        fs.writeFileSync(COOKIE_PATH, process.env.YOUTUBE_COOKIES);
+        console.log("✅ Cookies loaded successfully from Environment.");
+    } catch (e) {
+        console.error("❌ Failed to write cookies file:", e);
+    }
+} else {
+    console.warn("⚠️ WARNING: No YOUTUBE_COOKIES found in Render Environment!");
+}
+
+// ---------------------------------------------------------
+// 🔐 CONFIGURATION: API KEYS (FALLBACK SYSTEM)
+// ---------------------------------------------------------
+const GEMINI_KEYS = [
+    process.env.GEMINI_API_KEY,
+    process.env.GEMINI_API_KEY_2,
+    process.env.GEMINI_API_KEY_3,
+    process.env.GEMINI_API_KEY_4
+].filter(key => key); 
+
+if (GEMINI_KEYS.length === 0) {
+    console.error("❌ NO GEMINI API KEYS FOUND!");
+} else {
+    console.log(`✅ Loaded ${GEMINI_KEYS.length} Gemini Keys.`);
+}
+
+// ---------------------------------------------------------
 // 🔒 CONFIGURATION: VERIFIED CALLERS
 // ---------------------------------------------------------
 const VERIFIED_CALLERS = [
-    "+972548498889",  // Your Number
-    "+972554402506",  // Caller 2
-    "+972525585720",  // Caller 3
-    "+972528263032",  // Caller 4
-    "+972583230268",  // Caller 5
-    ""                // Caller 6 (Empty is ignored)
+    "+972548498889", 
+    "+972554402506", 
+    "+972525585720", 
+    "+972528263032", 
+    "+972583230268", 
+    "" 
 ].filter(num => num !== "");
 
 const PORT = process.env.PORT || 3000;
@@ -31,13 +64,6 @@ process.on("unhandledRejection", err => console.error("UNHANDLED:", err));
 
 const { twiml } = twilio;
 const VoiceResponse = twiml.VoiceResponse;
-
-// 🤖 GEMINI SETUP (Only for Main Chat)
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({
-    model: "gemini-2.5-flash", 
-    systemInstruction: "You are a helpful phone assistant. Keep answers short. If user asks for music, say 'Press hash'.",
-});
 
 const app = express();
 app.use(express.urlencoded({ extended: false }));
@@ -53,22 +79,51 @@ app.get("/music/:filename", (req, res) => {
     }
 });
 
-// 🧠 SESSION STORAGE (Stores Chat + Music History)
+// 🧠 SESSION STORAGE
 const sessions = new Map();
 
 function getSession(callSid) {
     if (!sessions.has(callSid)) {
         sessions.set(callSid, {
-            gemini: model.startChat({ history: [] }),
-            history: [], // List of songs played
-            index: -1    // Current song position
+            chatHistory: [], 
+            musicHistory: [], 
+            index: -1    
         });
     }
     return sessions.get(callSid);
 }
 
 // ---------------------------------------------------------
-// 🎵 HELPER: DOWNLOAD SONG (With Auto-Delete)
+// 🤖 HELPER: GEMINI WITH FALLBACK LOGIC
+// ---------------------------------------------------------
+async function getGeminiResponse(session, userText) {
+    for (let i = 0; i < GEMINI_KEYS.length; i++) {
+        const currentKey = GEMINI_KEYS[i];
+        try {
+            const genAI = new GoogleGenerativeAI(currentKey);
+            const model = genAI.getGenerativeModel({
+                model: "gemini-2.5-flash", 
+                systemInstruction: "You are a helpful phone assistant. Keep answers short. If user asks for music, say 'Press hash'.",
+            });
+
+            const chat = model.startChat({ history: session.chatHistory });
+            const result = await chat.sendMessage(userText);
+            const responseText = result.response.text();
+
+            session.chatHistory.push({ role: "user", parts: [{ text: userText }] });
+            session.chatHistory.push({ role: "model", parts: [{ text: responseText }] });
+            
+            return responseText;
+
+        } catch (error) {
+            console.error(`⚠️ Key ${i + 1} Failed: ${error.message}`);
+        }
+    }
+    return "Sorry, I am having trouble connecting to the servers.";
+}
+
+// ---------------------------------------------------------
+// 🎵 HELPER: DOWNLOAD SONG (WITH COOKIES)
 // ---------------------------------------------------------
 async function downloadSong(query) {
     console.log(`🎵 Searching: "${query}"...`);
@@ -76,8 +131,16 @@ async function downloadSong(query) {
     const filename = `${uniqueId}.mp3`;
     const outputTemplate = path.join(DOWNLOAD_DIR, `${uniqueId}.%(ext)s`);
 
-    // Android Client Command (Bypasses Bot Check)
-    const command = `yt-dlp "ytsearch1:${query}" -x --audio-format mp3 --no-playlist --force-ipv4 --extractor-args "youtube:player_client=android" -o "${outputTemplate}"`;
+    // 🛠️ COMMAND WITH COOKIES
+    // We point --cookies to the file we created at the top of the script
+    let command = `yt-dlp "ytsearch1:${query}" -x --audio-format mp3 --no-playlist --force-ipv4 -o "${outputTemplate}"`;
+
+    if (fs.existsSync(COOKIE_PATH)) {
+        command += ` --cookies "${COOKIE_PATH}"`;
+        console.log("🍪 Using Cookies for authentication.");
+    } else {
+        console.log("⚠️ No cookies file found, trying without...");
+    }
 
     console.log(`🚀 Running: ${command}`);
 
@@ -89,7 +152,7 @@ async function downloadSong(query) {
                 return reject(error);
             }
 
-            // 🗑️ AUTO-DELETE: Deletes file after 10 minutes
+            // 🗑️ AUTO-DELETE (10 Minutes)
             const filePath = path.join(DOWNLOAD_DIR, filename);
             setTimeout(() => {
                 if (fs.existsSync(filePath)) {
@@ -116,7 +179,6 @@ app.post("/twiml", (req, res) => {
     const caller = req.body.From;
     console.log(`📞 Incoming Call from: ${caller}`);
 
-    // 🔒 SECURITY CHECK
     if (!VERIFIED_CALLERS.includes(caller)) {
         console.log("⛔ Unverified Caller - Rejecting");
         const r = new VoiceResponse();
@@ -124,7 +186,6 @@ app.post("/twiml", (req, res) => {
         return res.type("text/xml").send(r.toString());
     }
 
-    // Reset Session
     sessions.delete(req.body.CallSid);
     getSession(req.body.CallSid); 
 
@@ -145,7 +206,7 @@ app.post("/twiml", (req, res) => {
 });
 
 // ---------------------------------------------------------
-// 📞 ROUTE 2: MAIN MENU (Gemini Only)
+// 📞 ROUTE 2: MAIN MENU
 // ---------------------------------------------------------
 app.post("/main-gather", async (req, res) => {
     const response = new VoiceResponse();
@@ -154,7 +215,6 @@ app.post("/main-gather", async (req, res) => {
     const userText = req.body.SpeechResult;
     const session = getSession(callSid);
 
-    // 🔴 Switch Modes
     if (digits === "0") {
         response.redirect("/twiml");
         return res.type("text/xml").send(response.toString());
@@ -166,117 +226,4 @@ app.post("/main-gather", async (req, res) => {
 
     if (!userText) {
         response.gather({ input: "speech dtmf", numDigits: 1, finishOnKey: "", action: "/main-gather" });
-        return res.type("text/xml").send(response.toString());
-    }
-
-    // 🤖 Gemini Logic
-    try {
-        const result = await session.gemini.sendMessage(userText);
-        response.say(result.response.text());
-    } catch (e) {
-        console.error("Gemini Error:", e);
-        response.say("Gemini is not responding.");
-    }
-
-    response.gather({ input: "speech dtmf", numDigits: 1, finishOnKey: "", action: "/main-gather" });
-    res.type("text/xml").send(response.toString());
-});
-
-// ---------------------------------------------------------
-// 🎵 ROUTE 3: MUSIC MODE ENTRY
-// ---------------------------------------------------------
-app.post("/music-mode", (req, res) => {
-    const response = new VoiceResponse();
-    
-    const gather = response.gather({
-        input: "speech dtmf",
-        numDigits: 1,
-        finishOnKey: "", 
-        action: "/music-process", 
-        timeout: 5,
-        bargeIn: true
-    });
-    gather.say("What song do you want to hear?"); 
-
-    res.type("text/xml").send(response.toString());
-});
-
-// ---------------------------------------------------------
-// 🎵 ROUTE 4: MUSIC PROCESS (Controls + Download)
-// ---------------------------------------------------------
-app.post("/music-process", async (req, res) => {
-    const response = new VoiceResponse();
-    const callSid = req.body.CallSid;
-    const digits = req.body.Digits;
-    const userText = req.body.SpeechResult;
-    
-    const session = getSession(callSid);
-
-    // 🛑 RESET (0)
-    if (digits === "0") {
-        response.redirect("/twiml");
-        return res.type("text/xml").send(response.toString());
-    }
-
-    // 🕹️ HISTORY CONTROLS: 4 (Back), 5 (Replay), 6 (Next)
-    if (["4", "5", "6"].includes(digits)) {
-        
-        if (session.history.length === 0) {
-            response.say("History empty. Say a song name.");
-            response.redirect("/music-mode");
-            return res.type("text/xml").send(response.toString());
-        }
-
-        // Logic to move the index pointer
-        if (digits === "4") { // BACK
-            if (session.index > 0) session.index--; 
-            else response.say("First song.");
-        }
-        else if (digits === "6") { // NEXT
-            if (session.index < session.history.length - 1) session.index++; 
-            else response.say("Last song.");
-        }
-        // 5 falls through here (index doesn't change = Replay)
-
-        // Play the song at the current index
-        const song = session.history[session.index];
-        response.say(`Playing ${song.title}`);
-        
-        // Use <Gather> around <Play> so you can interrupt with 4,5,6 again
-        const gather = response.gather({ input: "dtmf", numDigits: 1, finishOnKey: "", action: "/music-process" });
-        gather.play(song.url);
-        
-        response.redirect("/music-mode"); 
-        return res.type("text/xml").send(response.toString());
-    }
-
-    // 🔍 DIRECT SEARCH (Voice -> Download)
-    if (userText) {
-        try {
-            const songData = await downloadSong(userText);
-            
-            // Add new song to history list
-            session.history.push(songData);
-            session.index = session.history.length - 1; // Set pointer to newest song
-
-            response.say(`Playing ${userText}`);
-            
-            const gather = response.gather({ input: "dtmf", numDigits: 1, finishOnKey: "", action: "/music-process" });
-            gather.play(songData.url);
-
-            response.redirect("/music-mode"); 
-
-        } catch (err) {
-            console.error("Music Error:", err);
-            response.say("Download failed. Try another song.");
-            response.redirect("/music-mode");
-        }
-        return res.type("text/xml").send(response.toString());
-    }
-
-    response.say("Say a song name.");
-    response.redirect("/music-mode");
-    res.type("text/xml").send(response.toString());
-});
-
-app.listen(PORT, () => console.log(`🚀 Server running on ${PORT}`));
+        return res.type("text/xm
