@@ -12,7 +12,6 @@ dotenv.config();
 // ---------------------------------------------------------
 // 🍪 SETUP COOKIES (THE FIX FOR BLOCKED DOWNLOADS)
 // ---------------------------------------------------------
-// We write the cookies from the Environment Variable to a temporary file
 const COOKIE_PATH = "/tmp/cookies.txt";
 
 if (process.env.YOUTUBE_COOKIES) {
@@ -23,7 +22,7 @@ if (process.env.YOUTUBE_COOKIES) {
         console.error("❌ Failed to write cookies file:", e);
     }
 } else {
-    console.warn("⚠️ WARNING: No YOUTUBE_COOKIES found in Render Environment!");
+    console.warn("⚠️ WARNING: No YOUTUBE_COOKIES found in Render Environment! Downloads may fail.");
 }
 
 // ---------------------------------------------------------
@@ -132,7 +131,6 @@ async function downloadSong(query) {
     const outputTemplate = path.join(DOWNLOAD_DIR, `${uniqueId}.%(ext)s`);
 
     // 🛠️ COMMAND WITH COOKIES
-    // We point --cookies to the file we created at the top of the script
     let command = `yt-dlp "ytsearch1:${query}" -x --audio-format mp3 --no-playlist --force-ipv4 -o "${outputTemplate}"`;
 
     if (fs.existsSync(COOKIE_PATH)) {
@@ -226,4 +224,103 @@ app.post("/main-gather", async (req, res) => {
 
     if (!userText) {
         response.gather({ input: "speech dtmf", numDigits: 1, finishOnKey: "", action: "/main-gather" });
-        return res.type("text/xm
+        return res.type("text/xml").send(response.toString());
+    }
+
+    const reply = await getGeminiResponse(session, userText);
+    response.say(reply);
+
+    response.gather({ input: "speech dtmf", numDigits: 1, finishOnKey: "", action: "/main-gather" });
+    res.type("text/xml").send(response.toString());
+});
+
+// ---------------------------------------------------------
+// 🎵 ROUTE 3: MUSIC MODE ENTRY
+// ---------------------------------------------------------
+app.post("/music-mode", (req, res) => {
+    const response = new VoiceResponse();
+    
+    const gather = response.gather({
+        input: "speech dtmf",
+        numDigits: 1,
+        finishOnKey: "", 
+        action: "/music-process", 
+        timeout: 5,
+        bargeIn: true
+    });
+    gather.say("What song do you want to hear?"); 
+
+    res.type("text/xml").send(response.toString());
+});
+
+// ---------------------------------------------------------
+// 🎵 ROUTE 4: MUSIC PROCESS
+// ---------------------------------------------------------
+app.post("/music-process", async (req, res) => {
+    const response = new VoiceResponse();
+    const callSid = req.body.CallSid;
+    const digits = req.body.Digits;
+    const userText = req.body.SpeechResult;
+    
+    const session = getSession(callSid);
+
+    if (digits === "0") {
+        response.redirect("/twiml");
+        return res.type("text/xml").send(response.toString());
+    }
+
+    if (["4", "5", "6"].includes(digits)) {
+        if (session.musicHistory.length === 0) {
+            response.say("History empty. Say a song name.");
+            response.redirect("/music-mode");
+            return res.type("text/xml").send(response.toString());
+        }
+
+        if (digits === "4") { 
+            if (session.index > 0) session.index--; 
+            else response.say("First song.");
+        }
+        else if (digits === "6") { 
+            if (session.index < session.musicHistory.length - 1) session.index++; 
+            else response.say("Last song.");
+        }
+
+        const song = session.musicHistory[session.index];
+        response.say(`Playing ${song.title}`);
+        
+        const gather = response.gather({ input: "dtmf", numDigits: 1, finishOnKey: "", action: "/music-process" });
+        gather.play(song.url);
+        
+        response.redirect("/music-mode"); 
+        return res.type("text/xml").send(response.toString());
+    }
+
+    if (userText) {
+        try {
+            const songData = await downloadSong(userText);
+            
+            session.musicHistory.push(songData);
+            session.index = session.musicHistory.length - 1; 
+
+            response.say(`Playing ${userText}`);
+            
+            const gather = response.gather({ input: "dtmf", numDigits: 1, finishOnKey: "", action: "/music-process" });
+            gather.play(songData.url);
+
+            response.redirect("/music-mode"); 
+
+        } catch (err) {
+            console.error("Music Error:", err);
+            response.say("Download failed. Try another song.");
+            response.redirect("/music-mode");
+        }
+        return res.type("text/xml").send(response.toString());
+    }
+
+    response.say("Say a song name.");
+    response.redirect("/music-mode");
+    // 🔴 THIS IS THE LINE THAT WAS BROKEN (Line 229)
+    res.type("text/xml").send(response.toString());
+});
+
+app.listen(PORT, () => console.log(`🚀 Server running on ${PORT}`));
