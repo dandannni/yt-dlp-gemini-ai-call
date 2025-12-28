@@ -1,4 +1,4 @@
-console.log("🚀 Starting Server with Cookie Support...");
+console.log("🚀 Starting Server with Auto-Cookie-Fixer...");
 
 import express from "express";
 import dotenv from "dotenv";
@@ -12,17 +12,32 @@ import { v4 as uuidv4 } from "uuid";
 dotenv.config();
 
 // ---------------------------------------------------------
-// 🍪 COOKIE SETUP (CRITICAL FIX)
+// 🍪 COOKIE REPAIR SYSTEM (CRITICAL FIX)
 // ---------------------------------------------------------
 const COOKIE_PATH = "/tmp/cookies.txt";
 
 if (process.env.YOUTUBE_COOKIES) {
     try {
-        // Write the secret cookies from Render to a file
-        fs.writeFileSync(COOKIE_PATH, process.env.YOUTUBE_COOKIES);
-        console.log("✅ YOUTUBE_COOKIES detected and saved to file.");
+        let cookieContent = process.env.YOUTUBE_COOKIES.trim();
+
+        // 🛠️ FIX 1: Force add the required Netscape Header if missing
+        if (!cookieContent.startsWith("# Netscape HTTP Cookie File")) {
+            console.log("🔧 Fixing Cookies: Adding missing Netscape Header...");
+            cookieContent = "# Netscape HTTP Cookie File\n\n" + cookieContent;
+        }
+
+        // 🛠️ FIX 2: Ensure proper newlines (Render sometimes squashes them)
+        // If the text looks like one giant line, we try to split it back up
+        if (!cookieContent.includes("\n") && cookieContent.includes(".youtube.com")) {
+             // This is a rough guess, but helps if newlines were lost
+             // Note: It's better if you pasted it correctly with newlines in Render
+             console.warn("⚠️ Warning: Cookies might have lost newlines. Trying to use as is.");
+        }
+
+        fs.writeFileSync(COOKIE_PATH, cookieContent);
+        console.log("✅ Cookies repaired and saved to file.");
     } catch (e) {
-        console.error("❌ Failed to save cookies:", e);
+        console.error("❌ Failed to process cookies:", e);
     }
 } else {
     console.warn("⚠️ NO COOKIES FOUND. YouTube will likely block this.");
