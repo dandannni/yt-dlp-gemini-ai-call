@@ -1,3 +1,5 @@
+console.log("🚀 Starting Server..."); // This confirms the app is launching
+
 import express from "express";
 import dotenv from "dotenv";
 import twilio from "twilio";
@@ -16,12 +18,17 @@ const logBuffer = [];
 const MAX_LOGS = 100;
 
 function addToLog(type, args) {
-    const msg = args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ');
-    const timestamp = new Date().toLocaleTimeString('en-US', { hour12: false });
-    const logLine = `[${timestamp}] [${type}] ${msg}`;
-    logBuffer.push(logLine);
-    if (logBuffer.length > MAX_LOGS) logBuffer.shift(); 
-    process.stdout.write(logLine + '\n');
+    try {
+        const msg = args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ');
+        const timestamp = new Date().toLocaleTimeString('en-US', { hour12: false });
+        const logLine = `[${timestamp}] [${type}] ${msg}`;
+        logBuffer.push(logLine);
+        if (logBuffer.length > MAX_LOGS) logBuffer.shift(); 
+        process.stdout.write(logLine + '\n');
+    } catch (e) {
+        // Fallback if logging fails
+        process.stdout.write('Log Error\n');
+    }
 }
 
 console.log = (...args) => addToLog("INFO", args);
@@ -29,24 +36,7 @@ console.error = (...args) => addToLog("ERROR", args);
 console.warn = (...args) => addToLog("WARN", args);
 
 // ---------------------------------------------------------
-// 🍪 SETUP COOKIES (THE FIX)
-// ---------------------------------------------------------
-const COOKIE_PATH = "/tmp/cookies.txt";
-
-if (process.env.YOUTUBE_COOKIES) {
-    try {
-        // Write the secret cookies from Render to a file
-        fs.writeFileSync(COOKIE_PATH, process.env.YOUTUBE_COOKIES);
-        console.log("✅ Cookies loaded successfully from Environment.");
-    } catch (e) {
-        console.error("❌ Failed to write cookies file:", e);
-    }
-} else {
-    console.warn("⚠️ WARNING: No YOUTUBE_COOKIES found in Render Environment!");
-}
-
-// ---------------------------------------------------------
-// 🔐 CONFIGURATION: API KEYS
+// 🔐 CONFIGURATION
 // ---------------------------------------------------------
 const GEMINI_KEYS = [
     process.env.GEMINI_API_KEY,
@@ -136,7 +126,7 @@ async function getGeminiResponse(session, userText) {
 }
 
 // ---------------------------------------------------------
-// 🎵 DOWNLOAD LOGIC (WITH COOKIES)
+// 🎵 DOWNLOAD LOGIC (TV MODE - NO COOKIES)
 // ---------------------------------------------------------
 async function downloadSong(query) {
     console.log(`🎵 Searching: "${query}"...`);
@@ -144,20 +134,13 @@ async function downloadSong(query) {
     const filename = `${uniqueId}.mp3`;
     const outputTemplate = path.join(DOWNLOAD_DIR, `${uniqueId}.%(ext)s`);
 
-    // 🛠️ COMMAND: USE COOKIES FILE
-    let command = `yt-dlp "ytsearch1:${query}" -x --audio-format mp3 --no-playlist --force-ipv4 -o "${outputTemplate}"`;
-
-    if (fs.existsSync(COOKIE_PATH)) {
-        command += ` --cookies "${COOKIE_PATH}"`;
-        console.log("🍪 Authenticating with Cookies.");
-    } else {
-        console.warn("⚠️ NO COOKIES FILE! This might fail.");
-    }
+    // Use TV Client (Most reliable free method)
+    const command = `yt-dlp "ytsearch1:${query}" -x --audio-format mp3 --no-playlist --force-ipv4 --extractor-args "youtube:player_client=tv" -o "${outputTemplate}"`;
 
     console.log(`🚀 Executing: ${command}`);
 
     return new Promise((resolve, reject) => {
-        exec(command, { timeout: 60000 }, (error, stdout, stderr) => {
+        exec(command, { timeout: 40000 }, (error, stdout, stderr) => {
             if (error) {
                 console.error("🚨 Download Error:", stderr);
                 return reject(error);
@@ -280,4 +263,5 @@ app.post("/music-process", async (req, res) => {
     res.type("text/xml").send(response.toString());
 });
 
+// 🔥 IMPORTANT: This starts the server
 app.listen(PORT, () => console.log(`🚀 Server running on ${PORT}`));
