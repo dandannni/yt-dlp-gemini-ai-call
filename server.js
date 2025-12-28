@@ -1,4 +1,4 @@
-console.log("🚀 Starting Server with Auto-Cookie-Fixer...");
+console.log("🚀 Starting Server (SoundCloud Mode)...");
 
 import express from "express";
 import dotenv from "dotenv";
@@ -12,39 +12,7 @@ import { v4 as uuidv4 } from "uuid";
 dotenv.config();
 
 // ---------------------------------------------------------
-// 🍪 COOKIE REPAIR SYSTEM (CRITICAL FIX)
-// ---------------------------------------------------------
-const COOKIE_PATH = "/tmp/cookies.txt";
-
-if (process.env.YOUTUBE_COOKIES) {
-    try {
-        let cookieContent = process.env.YOUTUBE_COOKIES.trim();
-
-        // 🛠️ FIX 1: Force add the required Netscape Header if missing
-        if (!cookieContent.startsWith("# Netscape HTTP Cookie File")) {
-            console.log("🔧 Fixing Cookies: Adding missing Netscape Header...");
-            cookieContent = "# Netscape HTTP Cookie File\n\n" + cookieContent;
-        }
-
-        // 🛠️ FIX 2: Ensure proper newlines (Render sometimes squashes them)
-        // If the text looks like one giant line, we try to split it back up
-        if (!cookieContent.includes("\n") && cookieContent.includes(".youtube.com")) {
-             // This is a rough guess, but helps if newlines were lost
-             // Note: It's better if you pasted it correctly with newlines in Render
-             console.warn("⚠️ Warning: Cookies might have lost newlines. Trying to use as is.");
-        }
-
-        fs.writeFileSync(COOKIE_PATH, cookieContent);
-        console.log("✅ Cookies repaired and saved to file.");
-    } catch (e) {
-        console.error("❌ Failed to process cookies:", e);
-    }
-} else {
-    console.warn("⚠️ NO COOKIES FOUND. YouTube will likely block this.");
-}
-
-// ---------------------------------------------------------
-// 📝 LOGGING SETUP
+// 📝 LIVE LOGGING (View at /logs?pwd=1234)
 // ---------------------------------------------------------
 const logBuffer = [];
 const MAX_LOGS = 100;
@@ -77,14 +45,16 @@ const GEMINI_KEYS = [
 if (GEMINI_KEYS.length === 0) console.error("❌ NO GEMINI API KEYS FOUND!");
 else console.log(`✅ Loaded ${GEMINI_KEYS.length} Gemini Keys.`);
 
+// ---------------------------------------------------------
+// 📞 VERIFIED CALLERS (HARDCODED)
+// ---------------------------------------------------------
 const VERIFIED_CALLERS = [
     "+972548498889", 
     "+972554402506", 
     "+972525585720", 
     "+972528263032", 
-    "+972583230268", 
-    "" 
-].filter(num => num !== "");
+    "+972583230268"
+];
 
 const PORT = process.env.PORT || 3000;
 const BASE_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
@@ -102,7 +72,7 @@ app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
 // ---------------------------------------------------------
-// 🕵️ LOG PAGE (/logs?pwd=1234)
+// 🕵️ LOG PAGE
 // ---------------------------------------------------------
 app.get("/logs", (req, res) => {
     if (req.query.pwd !== "1234") return res.status(403).send("🚫 Access Denied.");
@@ -155,24 +125,18 @@ async function getGeminiResponse(session, userText) {
 }
 
 // ---------------------------------------------------------
-// 🎵 DOWNLOAD LOGIC (COOKIE ENABLED)
+// 🎵 DOWNLOAD LOGIC (SOUNDCLOUD - NO BLOCKING)
 // ---------------------------------------------------------
 async function downloadSong(query) {
-    console.log(`🎵 Searching: "${query}"...`);
+    console.log(`🎵 Searching SoundCloud: "${query}"...`);
     const uniqueId = uuidv4();
     const filename = `${uniqueId}.mp3`;
     const outputTemplate = path.join(DOWNLOAD_DIR, `${uniqueId}.%(ext)s`);
 
-    // 🛠️ COMMAND WITH COOKIES
-    // Note: We removed 'player_client' because we want to act like a real browser (Cookies)
-    let command = `yt-dlp "ytsearch1:${query}" -x --audio-format mp3 --no-playlist --force-ipv4 -o "${outputTemplate}"`;
-
-    if (fs.existsSync(COOKIE_PATH)) {
-        command += ` --cookies "${COOKIE_PATH}"`;
-        console.log("🍪 Authenticating with Cookies...");
-    } else {
-        console.log("⚠️ No cookies file found. This might fail.");
-    }
+    // 🛠️ CHANGED TO SOUNDCLOUD (scsearch1)
+    // This bypasses the YouTube blocking issues completely.
+    // We do NOT use cookies here.
+    const command = `yt-dlp "scsearch1:${query}" -x --audio-format mp3 --no-playlist --force-ipv4 -o "${outputTemplate}"`;
 
     console.log(`🚀 Executing: ${command}`);
 
@@ -182,6 +146,7 @@ async function downloadSong(query) {
                 console.error("🚨 Download Error:", stderr);
                 return reject(error);
             }
+            // Auto-delete after 10 mins
             setTimeout(() => {
                 if (fs.existsSync(path.join(DOWNLOAD_DIR, filename))) fs.unlinkSync(path.join(DOWNLOAD_DIR, filename));
             }, 600000); 
@@ -200,7 +165,7 @@ app.post("/twiml", (req, res) => {
     console.log(`📞 Call from: ${caller}`);
 
     if (!VERIFIED_CALLERS.includes(caller)) {
-        console.log("⛔ Blocked Caller");
+        console.log(`⛔ Blocked Caller: ${caller}`);
         const r = new VoiceResponse();
         r.reject();
         return res.type("text/xml").send(r.toString());
@@ -300,5 +265,4 @@ app.post("/music-process", async (req, res) => {
     res.type("text/xml").send(response.toString());
 });
 
-// 🔥 IMPORTANT: This starts the server
 app.listen(PORT, () => console.log(`🚀 Server running on ${PORT}`));
