@@ -1,7 +1,7 @@
 {
   "name": "gemini-phone-call",
   "version": "1.0.0",
-  "description": "AI phone assistant (Twilio + Gemini + Music)",
+  "description": "AI Phone Bot",
   "type": "module",
   "main": "server.js",
   "scripts": {
@@ -11,9 +11,7 @@
     "@google/generative-ai": "latest",
     "dotenv": "^16.3.1",
     "express": "^4.18.2",
-    "express-ws": "^5.0.2",
     "twilio": "^4.18.0",
-    "ws": "^8.13.0",
     "uuid": "^9.0.1"
   }
 }
