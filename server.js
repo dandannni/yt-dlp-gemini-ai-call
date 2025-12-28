@@ -1,4 +1,4 @@
-console.log("🚀 Starting Server..."); // This confirms the app is launching
+console.log("🚀 Starting Server with Cookie Support...");
 
 import express from "express";
 import dotenv from "dotenv";
@@ -12,7 +12,24 @@ import { v4 as uuidv4 } from "uuid";
 dotenv.config();
 
 // ---------------------------------------------------------
-// 📝 LIVE LOGGING (View at /logs?pwd=1234)
+// 🍪 COOKIE SETUP (CRITICAL FIX)
+// ---------------------------------------------------------
+const COOKIE_PATH = "/tmp/cookies.txt";
+
+if (process.env.YOUTUBE_COOKIES) {
+    try {
+        // Write the secret cookies from Render to a file
+        fs.writeFileSync(COOKIE_PATH, process.env.YOUTUBE_COOKIES);
+        console.log("✅ YOUTUBE_COOKIES detected and saved to file.");
+    } catch (e) {
+        console.error("❌ Failed to save cookies:", e);
+    }
+} else {
+    console.warn("⚠️ NO COOKIES FOUND. YouTube will likely block this.");
+}
+
+// ---------------------------------------------------------
+// 📝 LOGGING SETUP
 // ---------------------------------------------------------
 const logBuffer = [];
 const MAX_LOGS = 100;
@@ -25,10 +42,7 @@ function addToLog(type, args) {
         logBuffer.push(logLine);
         if (logBuffer.length > MAX_LOGS) logBuffer.shift(); 
         process.stdout.write(logLine + '\n');
-    } catch (e) {
-        // Fallback if logging fails
-        process.stdout.write('Log Error\n');
-    }
+    } catch (e) { process.stdout.write('Log Error\n'); }
 }
 
 console.log = (...args) => addToLog("INFO", args);
@@ -73,7 +87,7 @@ app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
 // ---------------------------------------------------------
-// 🕵️ SECRET LOG PAGE
+// 🕵️ LOG PAGE (/logs?pwd=1234)
 // ---------------------------------------------------------
 app.get("/logs", (req, res) => {
     if (req.query.pwd !== "1234") return res.status(403).send("🚫 Access Denied.");
@@ -126,7 +140,7 @@ async function getGeminiResponse(session, userText) {
 }
 
 // ---------------------------------------------------------
-// 🎵 DOWNLOAD LOGIC (TV MODE - NO COOKIES)
+// 🎵 DOWNLOAD LOGIC (COOKIE ENABLED)
 // ---------------------------------------------------------
 async function downloadSong(query) {
     console.log(`🎵 Searching: "${query}"...`);
@@ -134,13 +148,21 @@ async function downloadSong(query) {
     const filename = `${uniqueId}.mp3`;
     const outputTemplate = path.join(DOWNLOAD_DIR, `${uniqueId}.%(ext)s`);
 
-    // Use TV Client (Most reliable free method)
-    const command = `yt-dlp "ytsearch1:${query}" -x --audio-format mp3 --no-playlist --force-ipv4 --extractor-args "youtube:player_client=tv" -o "${outputTemplate}"`;
+    // 🛠️ COMMAND WITH COOKIES
+    // Note: We removed 'player_client' because we want to act like a real browser (Cookies)
+    let command = `yt-dlp "ytsearch1:${query}" -x --audio-format mp3 --no-playlist --force-ipv4 -o "${outputTemplate}"`;
+
+    if (fs.existsSync(COOKIE_PATH)) {
+        command += ` --cookies "${COOKIE_PATH}"`;
+        console.log("🍪 Authenticating with Cookies...");
+    } else {
+        console.log("⚠️ No cookies file found. This might fail.");
+    }
 
     console.log(`🚀 Executing: ${command}`);
 
     return new Promise((resolve, reject) => {
-        exec(command, { timeout: 40000 }, (error, stdout, stderr) => {
+        exec(command, { timeout: 60000 }, (error, stdout, stderr) => {
             if (error) {
                 console.error("🚨 Download Error:", stderr);
                 return reject(error);
