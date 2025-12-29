@@ -1,11 +1,9 @@
-console.log("🚀 Starting Server with Real-Time Progress Logs...");
+console.log("🚀 Starting SoundCloud Streaming Server...");
 
 import express from "express";
 import dotenv from "dotenv";
 import twilio from "twilio";
 import { GoogleGenerativeAI } from "@google/generative-ai";
-import path from "path";
-import fs from "fs";
 import { spawn } from "child_process"; 
 import { v4 as uuidv4 } from "uuid";
 
@@ -21,14 +19,11 @@ function addToLog(type, args) {
     try {
         const msg = args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ');
         const timestamp = new Date().toLocaleTimeString('en-US', { hour12: false });
-        
-        // Clean up yt-dlp progress bars to avoid messy logs
+        // Clean up logs
         const cleanMsg = msg.replace(/\r/g, ''); 
-
         const logLine = `[${timestamp}] [${type}] ${cleanMsg}`;
         logBuffer.push(logLine);
         if (logBuffer.length > MAX_LOGS) logBuffer.shift(); 
-        
         process.stdout.write(logLine + '\n');
     } catch (e) { process.stdout.write('Log Error\n'); }
 }
@@ -60,7 +55,6 @@ const VERIFIED_CALLERS = [
 
 const PORT = process.env.PORT || 3000;
 const BASE_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
-const DOWNLOAD_DIR = "/tmp"; 
 
 // Crash logging
 process.on("uncaughtException", err => console.error("UNCAUGHT:", err));
@@ -74,7 +68,7 @@ app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
 // ---------------------------------------------------------
-// 🕵️ LOG PAGE (Auto-Refresh every 1 second)
+// 🕵️ LOG PAGE
 // ---------------------------------------------------------
 app.get("/logs", (req, res) => {
     if (req.query.pwd !== "1234") return res.status(403).send("🚫 Access Denied.");
@@ -86,20 +80,9 @@ app.get("/logs", (req, res) => {
     `);
 });
 
-// 📂 SERVE AUDIO FILES
-app.get("/music/:filename", (req, res) => {
-    const filePath = path.resolve(DOWNLOAD_DIR, req.params.filename);
-    if (!fs.existsSync(filePath)) return res.status(404).send("File deleted or not found");
-
-    const stat = fs.statSync(filePath);
-    res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Content-Length': stat.size });
-    const readStream = fs.createReadStream(filePath);
-    readStream.pipe(res);
-});
-
 // 🧠 SESSION STORAGE
 const sessions = new Map();
-const downloadQueue = new Map(); 
+const streamMap = new Map(); // Maps ID -> Song Name
 
 function getSession(callSid) {
     if (!sessions.has(callSid)) {
@@ -133,60 +116,62 @@ async function getGeminiResponse(session, userText) {
 }
 
 // ---------------------------------------------------------
-// 🎵 DOWNLOAD LOGIC (REAL-TIME LOGS + SOUNDCLOUD)
+// 🌊 LIVE STREAMING ENDPOINT (SoundCloud -> Twilio)
 // ---------------------------------------------------------
-async function startDownload(callSid, query) {
-    console.log(`🎵 [Start] Downloading: "${query}"`);
-    downloadQueue.set(callSid, { status: 'pending' });
+app.get("/stream/:id", (req, res) => {
+    const query = streamMap.get(req.params.id);
+    if (!query) return res.status(404).end();
 
-    const uniqueId = uuidv4();
-    const filename = `${uniqueId}.mp3`;
-    const outputTemplate = path.join(DOWNLOAD_DIR, `${uniqueId}.%(ext)s`);
+    console.log(`🎵 STREAMING START: ${query}`);
 
-    // Using scsearch1 (SoundCloud) to avoid blocking
-    const args = [
-        `scsearch1:${query}`, 
-        '-x', 
-        '--audio-format', 'mp3', 
-        '--no-playlist', 
-        '--force-ipv4', 
-        '-o', outputTemplate
+    // Header tells Twilio "This is MP3 audio"
+    res.writeHead(200, {
+        'Content-Type': 'audio/mpeg',
+        'Transfer-Encoding': 'chunked'
+    });
+
+    // 1. YT-DLP (SoundCloud Source)
+    // -o - means "Output to Standard Out (Console)" so we can grab it
+    const ytArgs = [
+        `scsearch1:${query}`, // SoundCloud Search
+        '-o', '-',            // Pipe output
+        '-f', 'mp3',          // Format
+        '--no-playlist',
+        '--force-ipv4'
     ];
 
-    const child = spawn('yt-dlp', args);
+    const yt = spawn('yt-dlp', ytArgs);
 
-    // Stream logs
-    child.stdout.on('data', (data) => {
-        const line = data.toString().trim();
-        if (line.includes('[download]') || line.includes('%')) {
-            console.log(`🔹 ${line}`);
-        }
+    // 2. FFMPEG (Converter)
+    // Converts whatever yt-dlp sends into a phone-friendly MP3 stream
+    const ffmpegArgs = [
+        '-i', 'pipe:0',       // Read from yt-dlp
+        '-f', 'mp3',          // Output MP3
+        '-ac', '1',           // Mono channel (faster)
+        '-ar', '8000',        // 8000Hz (Phone quality, loads fast)
+        'pipe:1'              // Send to response
+    ];
+
+    const ffmpeg = spawn('ffmpeg', ffmpegArgs);
+
+    // 🔗 PIPE CHAIN: yt-dlp -> ffmpeg -> Twilio
+    yt.stdout.pipe(ffmpeg.stdin);
+    ffmpeg.stdout.pipe(res);
+
+    // Logging
+    yt.stderr.on('data', d => {
+        const msg = d.toString();
+        // Only show errors or download progress
+        if(msg.includes('ERROR') || msg.includes('[download]')) console.log(`🔹 ${msg.trim()}`);
     });
 
-    child.stderr.on('data', (data) => {
-        const line = data.toString().trim();
-        if (!line.includes('WARNING')) {
-            console.error(`🔸 ${line}`);
-        }
+    // Cleanup if phone hangs up
+    req.on('close', () => {
+        console.log("🛑 Call ended / Stream closed.");
+        yt.kill();
+        ffmpeg.kill();
     });
-
-    child.on('close', (code) => {
-        if (code === 0) {
-            console.log("✅ Download Finished Successfully.");
-            downloadQueue.set(callSid, { 
-                status: 'done', 
-                url: `${BASE_URL}/music/${filename}`,
-                title: query
-            });
-            setTimeout(() => {
-                if (fs.existsSync(path.join(DOWNLOAD_DIR, filename))) fs.unlinkSync(path.join(DOWNLOAD_DIR, filename));
-            }, 600000); 
-        } else {
-            console.error(`🚨 Download failed with exit code ${code}`);
-            downloadQueue.set(callSid, { status: 'error' });
-        }
-    });
-}
+});
 
 // ---------------------------------------------------------
 // 📞 ROUTE: START
@@ -240,15 +225,15 @@ app.post("/main-gather", async (req, res) => {
 // ---------------------------------------------------------
 app.post("/music-mode", (req, res) => {
     const response = new VoiceResponse();
-    const gather = response.gather({ input: "speech dtmf", numDigits: 1, finishOnKey: "", action: "/music-process", timeout: 5, bargeIn: true });
+    const gather = response.gather({ input: "speech dtmf", numDigits: 1, finishOnKey: "", action: "/music-logic", timeout: 5, bargeIn: true });
     gather.say("What song?"); 
     res.type("text/xml").send(response.toString());
 });
 
 // ---------------------------------------------------------
-// 🎵 ROUTE: MUSIC PROCESS
+// 🎵 ROUTE: MUSIC LOGIC (Direct Stream)
 // ---------------------------------------------------------
-app.post("/music-process", async (req, res) => {
+app.post("/music-logic", async (req, res) => {
     const response = new VoiceResponse();
     const callSid = req.body.CallSid;
     const digits = req.body.Digits;
@@ -256,6 +241,9 @@ app.post("/music-process", async (req, res) => {
     const session = getSession(callSid);
 
     if (digits === "0") { response.redirect("/twiml"); return res.type("text/xml").send(response.toString()); }
+
+    // 🕹️ Controls (4, 5, 6)
+    let playQuery = null;
 
     if (["4", "5", "6"].includes(digits)) {
         if (session.musicHistory.length === 0) {
@@ -266,67 +254,34 @@ app.post("/music-process", async (req, res) => {
         if (digits === "4" && session.index > 0) session.index--; 
         if (digits === "6" && session.index < session.musicHistory.length - 1) session.index++; 
 
-        const song = session.musicHistory[session.index];
-        response.say(`Playing ${song.title}`);
-        const gather = response.gather({ input: "dtmf", numDigits: 1, finishOnKey: "", action: "/music-process" });
-        gather.play(song.url);
-        response.redirect("/music-mode"); 
-        return res.type("text/xml").send(response.toString());
+        playQuery = session.musicHistory[session.index];
     }
-
-    if (userText) {
-        startDownload(callSid, userText); // Start Background Download
-        
-        response.say("Searching...");
-        response.redirect("/music-check-status"); // Go to Loop
-        return res.type("text/xml").send(response.toString());
-    }
-
-    response.say("Say a song name.");
-    response.redirect("/music-mode");
-    res.type("text/xml").send(response.toString());
-});
-
-// ---------------------------------------------------------
-// 🔄 ROUTE: WAIT LOOP
-// ---------------------------------------------------------
-app.post("/music-check-status", (req, res) => {
-    const response = new VoiceResponse();
-    const callSid = req.body.CallSid;
-    const download = downloadQueue.get(callSid);
-
-    if (!download) {
-        response.say("Error.");
-        response.redirect("/music-mode");
-        return res.type("text/xml").send(response.toString());
-    }
-
-    if (download.status === 'pending') {
-        response.pause({ length: 3 }); // Wait 3s
-        response.redirect("/music-check-status"); // Loop
-        return res.type("text/xml").send(response.toString());
-    }
-
-    if (download.status === 'error') {
-        response.say("Download failed.");
-        downloadQueue.delete(callSid);
-        response.redirect("/music-mode");
-        return res.type("text/xml").send(response.toString());
-    }
-
-    if (download.status === 'done') {
-        const session = getSession(callSid);
-        session.musicHistory.push({ title: download.title, url: download.url });
+    // 🔍 New Search
+    else if (userText) {
+        playQuery = userText;
+        session.musicHistory.push(userText);
         session.index = session.musicHistory.length - 1;
-
-        response.say(`Playing ${download.title}`);
-        const gather = response.gather({ input: "dtmf", numDigits: 1, finishOnKey: "", action: "/music-process" });
-        gather.play(download.url);
-        
-        downloadQueue.delete(callSid);
-        response.redirect("/music-mode");
-        return res.type("text/xml").send(response.toString());
     }
+
+    if (playQuery) {
+        // Generate a unique ID for this specific stream
+        const streamId = uuidv4();
+        streamMap.set(streamId, playQuery);
+
+        console.log(`🎵 Setup Stream for: ${playQuery}`);
+        response.say(`Playing ${playQuery}`);
+        
+        // 🌊 DIRECT STREAMING (No waiting!)
+        const gather = response.gather({ input: "dtmf", numDigits: 1, finishOnKey: "", action: "/music-logic" });
+        gather.play(`${BASE_URL}/stream/${streamId}`);
+        
+        response.redirect("/music-mode"); // Loop when done
+    } else {
+        response.say("Say a song name.");
+        response.redirect("/music-mode");
+    }
+
+    res.type("text/xml").send(response.toString());
 });
 
 app.listen(PORT, () => console.log(`🚀 Server running on ${PORT}`));
