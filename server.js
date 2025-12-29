@@ -1,4 +1,4 @@
-console.log("🚀 Starting Server with 'Please Wait' Loop...");
+console.log("🚀 Starting Server with Real-Time Progress Logs...");
 
 import express from "express";
 import dotenv from "dotenv";
@@ -6,32 +6,33 @@ import twilio from "twilio";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import path from "path";
 import fs from "fs";
-import { exec } from "child_process";
+import { spawn } from "child_process"; 
 import { v4 as uuidv4 } from "uuid";
 
 dotenv.config();
 
 // ---------------------------------------------------------
-// 🔄 DOWNLOAD QUEUE (To fix the 15s Timeout)
-// ---------------------------------------------------------
-// Stores the status of downloads: 'pending', 'done', or 'error'
-const downloadQueue = new Map(); 
-
-// ---------------------------------------------------------
-// 📝 LOGGING
+// 📝 LIVE LOGGING SYSTEM
 // ---------------------------------------------------------
 const logBuffer = [];
-const MAX_LOGS = 100;
+const MAX_LOGS = 200; 
+
 function addToLog(type, args) {
     try {
         const msg = args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ');
         const timestamp = new Date().toLocaleTimeString('en-US', { hour12: false });
-        const logLine = `[${timestamp}] [${type}] ${msg}`;
+        
+        // Clean up yt-dlp progress bars to avoid messy logs
+        const cleanMsg = msg.replace(/\r/g, ''); 
+
+        const logLine = `[${timestamp}] [${type}] ${cleanMsg}`;
         logBuffer.push(logLine);
         if (logBuffer.length > MAX_LOGS) logBuffer.shift(); 
+        
         process.stdout.write(logLine + '\n');
     } catch (e) { process.stdout.write('Log Error\n'); }
 }
+
 console.log = (...args) => addToLog("INFO", args);
 console.error = (...args) => addToLog("ERROR", args);
 console.warn = (...args) => addToLog("WARN", args);
@@ -73,22 +74,32 @@ app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
 // ---------------------------------------------------------
-// 🕵️ LOG PAGE
+// 🕵️ LOG PAGE (Auto-Refresh every 1 second)
 // ---------------------------------------------------------
 app.get("/logs", (req, res) => {
     if (req.query.pwd !== "1234") return res.status(403).send("🚫 Access Denied.");
-    res.send(`<html><head><title>Logs</title><meta http-equiv="refresh" content="2"><style>body{background:#111;color:#0f0;font-family:monospace;padding:10px;}</style></head><body><h3>📜 Live Logs</h3><pre>${logBuffer.join("\n")}</pre></body></html>`);
+    res.send(`
+        <html><head><title>Logs</title>
+        <meta http-equiv="refresh" content="1"> 
+        <style>body{background:#111;color:#0f0;font-family:monospace;padding:10px;font-size:12px;}</style>
+        </head><body><h3>📜 Live Logs</h3><pre>${logBuffer.join("\n")}</pre></body></html>
+    `);
 });
 
 // 📂 SERVE AUDIO FILES
 app.get("/music/:filename", (req, res) => {
-    const filePath = path.join(DOWNLOAD_DIR, req.params.filename);
-    if (fs.existsSync(filePath)) res.sendFile(filePath);
-    else res.status(404).send("File deleted or not found");
+    const filePath = path.resolve(DOWNLOAD_DIR, req.params.filename);
+    if (!fs.existsSync(filePath)) return res.status(404).send("File deleted or not found");
+
+    const stat = fs.statSync(filePath);
+    res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Content-Length': stat.size });
+    const readStream = fs.createReadStream(filePath);
+    readStream.pipe(res);
 });
 
 // 🧠 SESSION STORAGE
 const sessions = new Map();
+const downloadQueue = new Map(); 
 
 function getSession(callSid) {
     if (!sessions.has(callSid)) {
@@ -122,41 +133,58 @@ async function getGeminiResponse(session, userText) {
 }
 
 // ---------------------------------------------------------
-// 🎵 DOWNLOAD LOGIC (SoundCloud - Async)
+// 🎵 DOWNLOAD LOGIC (REAL-TIME LOGS + SOUNDCLOUD)
 // ---------------------------------------------------------
 async function startDownload(callSid, query) {
-    console.log(`🎵 [Background] Starting download for: "${query}"`);
-    
-    // Set status to PENDING
+    console.log(`🎵 [Start] Downloading: "${query}"`);
     downloadQueue.set(callSid, { status: 'pending' });
 
     const uniqueId = uuidv4();
     const filename = `${uniqueId}.mp3`;
     const outputTemplate = path.join(DOWNLOAD_DIR, `${uniqueId}.%(ext)s`);
 
-    // Using SoundCloud because it's faster and doesn't block
-    const command = `yt-dlp "scsearch1:${query}" -x --audio-format mp3 --no-playlist --force-ipv4 -o "${outputTemplate}"`;
+    // Using scsearch1 (SoundCloud) to avoid blocking
+    const args = [
+        `scsearch1:${query}`, 
+        '-x', 
+        '--audio-format', 'mp3', 
+        '--no-playlist', 
+        '--force-ipv4', 
+        '-o', outputTemplate
+    ];
 
-    exec(command, { timeout: 120000 }, (error, stdout, stderr) => {
-        if (error) {
-            console.error("🚨 Download Error:", stderr);
-            downloadQueue.set(callSid, { status: 'error' });
-            return;
+    const child = spawn('yt-dlp', args);
+
+    // Stream logs
+    child.stdout.on('data', (data) => {
+        const line = data.toString().trim();
+        if (line.includes('[download]') || line.includes('%')) {
+            console.log(`🔹 ${line}`);
         }
-        
-        // Success! Update the queue
-        console.log("✅ Download finished in background.");
-        downloadQueue.set(callSid, { 
-            status: 'done', 
-            url: `${BASE_URL}/music/${filename}`,
-            title: query,
-            filename: filename
-        });
+    });
 
-        // Auto-delete after 10 mins
-        setTimeout(() => {
-            if (fs.existsSync(path.join(DOWNLOAD_DIR, filename))) fs.unlinkSync(path.join(DOWNLOAD_DIR, filename));
-        }, 600000); 
+    child.stderr.on('data', (data) => {
+        const line = data.toString().trim();
+        if (!line.includes('WARNING')) {
+            console.error(`🔸 ${line}`);
+        }
+    });
+
+    child.on('close', (code) => {
+        if (code === 0) {
+            console.log("✅ Download Finished Successfully.");
+            downloadQueue.set(callSid, { 
+                status: 'done', 
+                url: `${BASE_URL}/music/${filename}`,
+                title: query
+            });
+            setTimeout(() => {
+                if (fs.existsSync(path.join(DOWNLOAD_DIR, filename))) fs.unlinkSync(path.join(DOWNLOAD_DIR, filename));
+            }, 600000); 
+        } else {
+            console.error(`🚨 Download failed with exit code ${code}`);
+            downloadQueue.set(callSid, { status: 'error' });
+        }
     });
 }
 
@@ -218,7 +246,7 @@ app.post("/music-mode", (req, res) => {
 });
 
 // ---------------------------------------------------------
-// 🎵 ROUTE: MUSIC PROCESS (Starts Download)
+// 🎵 ROUTE: MUSIC PROCESS
 // ---------------------------------------------------------
 app.post("/music-process", async (req, res) => {
     const response = new VoiceResponse();
@@ -229,7 +257,6 @@ app.post("/music-process", async (req, res) => {
 
     if (digits === "0") { response.redirect("/twiml"); return res.type("text/xml").send(response.toString()); }
 
-    // 🕹️ History Controls
     if (["4", "5", "6"].includes(digits)) {
         if (session.musicHistory.length === 0) {
             response.say("No history.");
@@ -247,14 +274,11 @@ app.post("/music-process", async (req, res) => {
         return res.type("text/xml").send(response.toString());
     }
 
-    // 🔍 New Search
     if (userText) {
-        // 1. Start download in BACKGROUND (do not await)
-        startDownload(callSid, userText);
+        startDownload(callSid, userText); // Start Background Download
         
-        // 2. Tell Twilio to wait and check status
         response.say("Searching...");
-        response.redirect("/music-check-status"); // Go to loop
+        response.redirect("/music-check-status"); // Go to Loop
         return res.type("text/xml").send(response.toString());
     }
 
@@ -264,44 +288,45 @@ app.post("/music-process", async (req, res) => {
 });
 
 // ---------------------------------------------------------
-// 🔄 ROUTE: CHECK STATUS LOOP
+// 🔄 ROUTE: WAIT LOOP
 // ---------------------------------------------------------
 app.post("/music-check-status", (req, res) => {
     const response = new VoiceResponse();
     const callSid = req.body.CallSid;
-    
     const download = downloadQueue.get(callSid);
 
-    // If no download found (weird error), go back
     if (!download) {
-        response.say("Error finding download.");
+        response.say("Error.");
         response.redirect("/music-mode");
         return res.type("text/xml").send(response.toString());
     }
 
-    // CASE 1: Still Downloading -> Wait 2 seconds and ask again
     if (download.status === 'pending') {
-        // Play 2 seconds of silence (or a ticking sound)
-        response.pause({ length: 2 });
-        // Loop back to this same route
-        response.redirect("/music-check-status");
+        response.pause({ length: 3 }); // Wait 3s
+        response.redirect("/music-check-status"); // Loop
         return res.type("text/xml").send(response.toString());
     }
 
-    // CASE 2: Error
     if (download.status === 'error') {
-        response.say("Sorry, the download failed.");
-        downloadQueue.delete(callSid); // Cleanup
+        response.say("Download failed.");
+        downloadQueue.delete(callSid);
         response.redirect("/music-mode");
         return res.type("text/xml").send(response.toString());
     }
 
-    // CASE 3: Done!
     if (download.status === 'done') {
         const session = getSession(callSid);
-        
-        // Add to history
         session.musicHistory.push({ title: download.title, url: download.url });
         session.index = session.musicHistory.length - 1;
 
         response.say(`Playing ${download.title}`);
+        const gather = response.gather({ input: "dtmf", numDigits: 1, finishOnKey: "", action: "/music-process" });
+        gather.play(download.url);
+        
+        downloadQueue.delete(callSid);
+        response.redirect("/music-mode");
+        return res.type("text/xml").send(response.toString());
+    }
+});
+
+app.listen(PORT, () => console.log(`🚀 Server running on ${PORT}`));
