@@ -1,4 +1,4 @@
-console.log("🚀 Starting Real-Time Streaming Server...");
+console.log("🚀 Starting CBR Streaming Server (SoundCloud)...");
 
 import express from "express";
 import dotenv from "dotenv";
@@ -12,11 +12,10 @@ import path from "path";
 dotenv.config();
 
 // ---------------------------------------------------------
-// 📝 LIVE LOGGING SYSTEM
+// 📝 LOGGING
 // ---------------------------------------------------------
 const logBuffer = [];
 const MAX_LOGS = 200; 
-
 function addToLog(type, args) {
     try {
         const msg = args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ');
@@ -28,7 +27,6 @@ function addToLog(type, args) {
         process.stdout.write(logLine + '\n');
     } catch (e) { process.stdout.write('Log Error\n'); }
 }
-
 console.log = (...args) => addToLog("INFO", args);
 console.error = (...args) => addToLog("ERROR", args);
 console.warn = (...args) => addToLog("WARN", args);
@@ -56,41 +54,13 @@ const VERIFIED_CALLERS = [
 
 const PORT = process.env.PORT || 3000;
 const BASE_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
-const DOWNLOAD_DIR = "/tmp"; 
-
-// Crash logging
-process.on("uncaughtException", err => console.error("UNCAUGHT:", err));
-process.on("unhandledRejection", err => console.error("UNHANDLED:", err));
 
 const { twiml } = twilio;
 const VoiceResponse = twiml.VoiceResponse;
-
 const app = express();
+
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
-
-// ---------------------------------------------------------
-// 🕵️ LOG PAGE
-// ---------------------------------------------------------
-app.get("/logs", (req, res) => {
-    if (req.query.pwd !== "1234") return res.status(403).send("🚫 Access Denied.");
-    res.send(`
-        <html><head><title>Logs</title>
-        <meta http-equiv="refresh" content="1"> 
-        <style>body{background:#111;color:#0f0;font-family:monospace;padding:10px;font-size:12px;}</style>
-        </head><body><h3>📜 Live Logs</h3><pre>${logBuffer.join("\n")}</pre></body></html>
-    `);
-});
-
-// 📂 SERVE AUDIO FILES
-app.get("/music/:filename", (req, res) => {
-    const filePath = path.resolve(DOWNLOAD_DIR, req.params.filename);
-    if (!fs.existsSync(filePath)) return res.status(404).send("File deleted or not found");
-    const stat = fs.statSync(filePath);
-    res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Content-Length': stat.size });
-    const readStream = fs.createReadStream(filePath);
-    readStream.pipe(res);
-});
 
 // 🧠 SESSION STORAGE
 const sessions = new Map();
@@ -104,13 +74,12 @@ function getSession(callSid) {
 }
 
 // ---------------------------------------------------------
-// 🤖 GEMINI LOGIC (FASTER MODEL)
+// 🤖 GEMINI LOGIC (Flash 1.5)
 // ---------------------------------------------------------
 async function getGeminiResponse(session, userText) {
     for (let i = 0; i < GEMINI_KEYS.length; i++) {
         try {
             const genAI = new GoogleGenerativeAI(GEMINI_KEYS[i]);
-            // ⚡ SWITCHED TO 1.5-FLASH FOR SPEED
             const model = genAI.getGenerativeModel({
                 model: "gemini-1.5-flash", 
                 systemInstruction: "You are a helpful phone assistant. Keep answers short (1 sentence). If user asks for music, say 'Press hash'.",
@@ -129,13 +98,13 @@ async function getGeminiResponse(session, userText) {
 }
 
 // ---------------------------------------------------------
-// 🌊 STREAMING ENDPOINT (THE FIX IS HERE)
+// 🌊 STREAMING ENDPOINT (FIXED: Constant Bitrate)
 // ---------------------------------------------------------
 app.get("/stream/:id", (req, res) => {
     const query = streamMap.get(req.params.id);
     if (!query) return res.status(404).end();
 
-    console.log(`🎵 STARTING STREAM: ${query}`);
+    console.log(`🎵 STARTING STREAM (CBR): ${query}`);
 
     res.writeHead(200, {
         'Content-Type': 'audio/mpeg',
@@ -153,13 +122,13 @@ app.get("/stream/:id", (req, res) => {
 
     const yt = spawn('yt-dlp', ytArgs);
 
-    // 2. FFMPEG (Throttled to Real-Time)
+    // 2. FFMPEG (The Fix is here)
     const ffmpegArgs = [
-        '-re',                // 🛑 CRITICAL FIX: Read input at native frame rate (prevents closing too fast)
         '-i', 'pipe:0',       
         '-f', 'mp3',          
-        '-ac', '1',           
-        '-ar', '8000',        
+        '-ac', '1',           // Mono
+        '-ar', '8000',        // 8000Hz (Standard Phone)
+        '-b:a', '128k',       // 🛑 FIX: Constant Bitrate (Prevents cutting off)
         'pipe:1'              
     ];
 
@@ -171,11 +140,11 @@ app.get("/stream/:id", (req, res) => {
 
     yt.stderr.on('data', d => {
         const msg = d.toString();
-        if(msg.includes('ERROR') || msg.includes('[download]')) console.log(`🔹 ${msg.trim()}`);
+        if(msg.includes('ERROR')) console.log(`🔹 YT: ${msg.trim()}`);
     });
 
     req.on('close', () => {
-        console.log("🔴 Stream closed by user.");
+        console.log("🔴 Stream closed.");
         yt.kill();
         ffmpeg.kill();
     });
@@ -242,7 +211,6 @@ app.post("/music-logic", async (req, res) => {
 
     if (digits === "0") { r.redirect("/twiml"); return res.type("text/xml").send(r.toString()); }
 
-    // 🕹️ Controls
     let playQuery = null;
     if (["4", "5", "6"].includes(digits)) {
         if (session.musicHistory.length === 0) {
@@ -261,8 +229,7 @@ app.post("/music-logic", async (req, res) => {
     if (playQuery) {
         const streamId = uuidv4();
         streamMap.set(streamId, playQuery);
-        
-        console.log(`🎵 Setup Stream for: ${playQuery}`);
+        console.log(`🎵 Queueing: ${playQuery}`);
         r.say(`Playing ${playQuery}`);
         
         const gather = r.gather({ input: "dtmf", numDigits: 1, finishOnKey: "", action: "/music-logic" });
