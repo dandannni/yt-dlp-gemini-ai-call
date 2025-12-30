@@ -1,4 +1,4 @@
-console.log("🚀 Starting Stable Server (Download + Wait Loop + Gemini 2.5)...");
+console.log("🚀 Starting Server (Fixed Logger + Safe Downloader)...");
 
 import express from "express";
 import dotenv from "dotenv";
@@ -6,25 +6,33 @@ import twilio from "twilio";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import path from "path";
 import fs from "fs";
-import { exec } from "child_process"; 
+import { spawn } from "child_process"; 
 import { v4 as uuidv4 } from "uuid";
 
 dotenv.config();
 
 // ---------------------------------------------------------
-// 📝 LOGGING SYSTEM
+// 📝 LOGGING SYSTEM (FIXED)
 // ---------------------------------------------------------
 const logBuffer = [];
 const MAX_LOGS = 200; 
 
 function addToLog(type, args) {
     try {
-        const msg = args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ');
+        const msg = args.map(a => {
+            if (a instanceof Error) return a.message + '\n' + a.stack; // Properly print Errors
+            if (typeof a === 'object') return JSON.stringify(a);
+            return String(a);
+        }).join(' ');
+
         const timestamp = new Date().toLocaleTimeString('en-US', { hour12: false });
+        // Clean up yt-dlp progress bars to keep logs clean
         const cleanMsg = msg.replace(/\r/g, ''); 
+
         const logLine = `[${timestamp}] [${type}] ${cleanMsg}`;
         logBuffer.push(logLine);
         if (logBuffer.length > MAX_LOGS) logBuffer.shift(); 
+        
         process.stdout.write(logLine + '\n');
     } catch (e) { process.stdout.write('Log Error\n'); }
 }
@@ -82,9 +90,7 @@ app.get("/logs", (req, res) => {
     `);
 });
 
-// ---------------------------------------------------------
 // 📂 SERVE AUDIO FILES
-// ---------------------------------------------------------
 app.get("/music/:filename", (req, res) => {
     const filePath = path.resolve(DOWNLOAD_DIR, req.params.filename);
     if (!fs.existsSync(filePath)) return res.status(404).send("File deleted or not found");
@@ -95,11 +101,9 @@ app.get("/music/:filename", (req, res) => {
     readStream.pipe(res);
 });
 
-// ---------------------------------------------------------
 // 🧠 SESSION STORAGE
-// ---------------------------------------------------------
 const sessions = new Map();
-const downloadQueue = new Map(); // Tracks download status: 'pending', 'done', 'error'
+const downloadQueue = new Map(); 
 
 function getSession(callSid) {
     if (!sessions.has(callSid)) {
@@ -109,43 +113,43 @@ function getSession(callSid) {
 }
 
 // ---------------------------------------------------------
-// 🤖 GEMINI LOGIC (1.5 FLASH)
+// 🤖 GEMINI LOGIC (1.5 FLASH - STABLE)
 // ---------------------------------------------------------
 async function getGeminiResponse(session, userText) {
     for (let i = 0; i < GEMINI_KEYS.length; i++) {
         try {
             const genAI = new GoogleGenerativeAI(GEMINI_KEYS[i]);
-            // ⚡ USING 1.5 FLASH
-            const model = genAI.getGenerativeModel({
-                model: "gemini-2.5-flash", 
+            // ⚡ USING 1.5 FLASH (Fast & Reliable)
+            const model = genAI.getGenerativeModel({ 
+                model: "gemini-1.5-flash",
                 systemInstruction: "You are a helpful phone assistant. Keep answers short (1 sentence). If user asks for music, say 'Press hash'.",
             });
             const chat = model.startChat({ history: session.chatHistory });
             const result = await chat.sendMessage(userText);
-            const responseText = result.response.text();
+            const text = result.response.text();
+            
             session.chatHistory.push({ role: "user", parts: [{ text: userText }] });
-            session.chatHistory.push({ role: "model", parts: [{ text: responseText }] });
-            return responseText;
+            session.chatHistory.push({ role: "model", parts: [{ text: text }] });
+            return text;
         } catch (error) {
-            console.error(`⚠️ Key ${i + 1} Failed: ${error.message}`);
+            console.error(`⚠️ Key ${i+1} Failed: ${error.message}`);
         }
     }
-    return "Sorry, I am having trouble connecting to the servers.";
+    return "I am having trouble thinking right now.";
 }
 
 // ---------------------------------------------------------
-// 🎵 DOWNLOAD LOGIC (SoundCloud + Wait Loop)
+// 🎵 DOWNLOAD LOGIC (SAFE SPAWN + SOUNDCLOUD)
 // ---------------------------------------------------------
 async function startDownload(callSid, query) {
     console.log(`🎵 [Start] Downloading: "${query}"`);
-    // Mark as pending to show user we are working on it
     downloadQueue.set(callSid, { status: 'pending', startTime: Date.now() });
 
     const uniqueId = uuidv4();
     const filename = `${uniqueId}.mp3`;
     const outputTemplate = path.join(DOWNLOAD_DIR, `${uniqueId}.%(ext)s`);
 
-    // Using SoundCloud (scsearch1) for reliability and speed
+    // SoundCloud (scsearch1) - Using spawn to avoid shell errors
     const args = [
         `scsearch1:${query}`, 
         '-x', 
@@ -157,17 +161,18 @@ async function startDownload(callSid, query) {
 
     const child = spawn('yt-dlp', args);
 
-    // Pipe logs for real-time progress
+    // Stream logs so we see what happens
     child.stdout.on('data', (data) => {
         const line = data.toString().trim();
         if (line.includes('[download]') || line.includes('%')) {
-            console.log(`🔹 ${line}`); // Show download progress
+            console.log(`🔹 ${line}`);
         }
     });
 
     child.stderr.on('data', (data) => {
         const line = data.toString().trim();
-        if (!line.includes('WARNING')) { // Ignore minor warnings
+        // Log errors but ignore common warnings
+        if (!line.includes('WARNING')) {
             console.error(`🔸 ${line}`);
         }
     });
@@ -182,13 +187,9 @@ async function startDownload(callSid, query) {
                 filename: filename
             });
             
-            // Auto-delete file after 10 minutes
+            // Auto-delete after 10 mins
             setTimeout(() => {
-                const f = path.join(DOWNLOAD_DIR, filename);
-                if (fs.existsSync(f)) {
-                    fs.unlinkSync(f);
-                    console.log(`🗑️ Auto-deleted: ${filename}`);
-                }
+                if (fs.existsSync(path.join(DOWNLOAD_DIR, filename))) fs.unlinkSync(path.join(DOWNLOAD_DIR, filename));
             }, 600000); 
         } else {
             console.error(`🚨 Download failed with exit code ${code}`);
@@ -198,162 +199,127 @@ async function startDownload(callSid, query) {
 }
 
 // ---------------------------------------------------------
-// 📞 ROUTE: START / RESET
+// 📞 ROUTE: START
 // ---------------------------------------------------------
 app.post("/twiml", (req, res) => {
-    const caller = req.body.From;
-    console.log(`📞 Call from: ${caller}`);
-
-    if (!VERIFIED_CALLERS.includes(caller)) {
-        console.log(`⛔ Blocked Caller: ${caller}`);
-        const r = new VoiceResponse();
-        r.reject();
-        return res.type("text/xml").send(r.toString());
+    if (!VERIFIED_CALLERS.includes(req.body.From)) {
+        const r = new VoiceResponse(); r.reject(); return res.type("text/xml").send(r.toString());
     }
-
-    // Reset session and queue for new calls
     sessions.delete(req.body.CallSid);
-    downloadQueue.delete(req.body.CallSid); 
     getSession(req.body.CallSid); 
-
-    const response = new VoiceResponse();
-    response.say("Connected. Ask Gemini, or press Pound for music.");
-    response.gather({ input: "speech dtmf", numDigits: 1, finishOnKey: "", action: "/main-gather", method: "POST", timeout: 5, bargeIn: true });
-    res.type("text/xml").send(response.toString());
+    
+    const r = new VoiceResponse();
+    r.say("Connected. Press Pound for music.");
+    r.gather({ input: "speech dtmf", numDigits: 1, action: "/gather", method: "POST", timeout: 5 });
+    res.type("text/xml").send(r.toString());
 });
 
 // ---------------------------------------------------------
-// 📞 ROUTE: MAIN GATHER (Gemini Chat)
+// 📞 ROUTE: MAIN GATHER
 // ---------------------------------------------------------
-app.post("/main-gather", async (req, res) => {
-    const response = new VoiceResponse();
-    const callSid = req.body.CallSid;
+app.post("/gather", async (req, res) => {
+    const r = new VoiceResponse();
+    const sid = req.body.CallSid;
     const digits = req.body.Digits;
-    const userText = req.body.SpeechResult;
-    const session = getSession(callSid);
+    const text = req.body.SpeechResult;
+    const session = getSession(sid);
 
-    if (digits === "0") { response.redirect("/twiml"); return res.type("text/xml").send(response.toString()); }
-    if (digits === "#") { response.redirect("/music-mode"); return res.type("text/xml").send(response.toString()); }
+    if (digits === "0") { r.redirect("/twiml"); return res.type("text/xml").send(r.toString()); }
+    if (digits === "#") { r.redirect("/music-mode"); return res.type("text/xml").send(r.toString()); }
 
-    if (!userText) {
-        response.gather({ input: "speech dtmf", numDigits: 1, finishOnKey: "", action: "/main-gather" });
-        return res.type("text/xml").send(response.toString());
+    if (!text) {
+        r.gather({ input: "speech dtmf", numDigits: 1, action: "/gather" });
+        return res.type("text/xml").send(r.toString());
     }
 
-    const reply = await getGeminiResponse(session, userText);
-    response.say(reply);
-    response.gather({ input: "speech dtmf", numDigits: 1, finishOnKey: "", action: "/main-gather" });
-    res.type("text/xml").send(response.toString());
+    const reply = await getGeminiResponse(session, text);
+    r.say(reply);
+    r.gather({ input: "speech dtmf", numDigits: 1, action: "/gather" });
+    res.type("text/xml").send(r.toString());
 });
 
 // ---------------------------------------------------------
 // 🎵 ROUTE: MUSIC ENTRY
 // ---------------------------------------------------------
 app.post("/music-mode", (req, res) => {
-    const response = new VoiceResponse();
-    const gather = response.gather({ input: "speech dtmf", numDigits: 1, finishOnKey: "", action: "/music-logic", timeout: 5, bargeIn: true });
+    const r = new VoiceResponse();
+    const gather = r.gather({ input: "speech dtmf", numDigits: 1, action: "/music-logic", timeout: 5 });
     gather.say("What song?"); 
-    res.type("text/xml").send(response.toString());
+    res.type("text/xml").send(r.toString());
 });
 
 // ---------------------------------------------------------
-// 🎵 ROUTE: MUSIC LOGIC (Start Download + Wait)
+// 🎵 ROUTE: MUSIC LOGIC
 // ---------------------------------------------------------
 app.post("/music-logic", async (req, res) => {
-    const response = new VoiceResponse();
-    const callSid = req.body.CallSid;
+    const r = new VoiceResponse();
+    const sid = req.body.CallSid;
     const digits = req.body.Digits;
-    const userText = req.body.SpeechResult;
-    const session = getSession(callSid);
+    const text = req.body.SpeechResult;
+    const session = getSession(sid);
 
-    if (digits === "0") { response.redirect("/twiml"); return res.type("text/xml").send(response.toString()); }
+    if (digits === "0") { r.redirect("/twiml"); return res.type("text/xml").send(r.toString()); }
 
-    // 🕹️ Controls
     if (["4", "5", "6"].includes(digits)) {
         if (session.musicHistory.length === 0) {
-            response.say("No history.");
-            response.redirect("/music-mode");
-            return res.type("text/xml").send(response.toString());
+            r.say("No history."); r.redirect("/music-mode"); return res.type("text/xml").send(r.toString());
         }
         if (digits === "4" && session.index > 0) session.index--; 
         if (digits === "6" && session.index < session.musicHistory.length - 1) session.index++; 
-
-        // Play from history
-        const song = session.musicHistory[session.index];
-        response.say(`Playing ${song.title}`);
-        const gather = response.gather({ input: "dtmf", numDigits: 1, finishOnKey: "", action: "/music-logic" });
-        gather.play(song.url);
-        response.redirect("/music-mode"); 
-        return res.type("text/xml").send(response.toString());
-    }
-
-    // 🔍 New Search
-    if (userText) {
-        startDownload(callSid, userText); // Start in background
         
-        response.say("Searching...");
-        response.redirect("/music-check-status"); // Go to Wait Loop
-        return res.type("text/xml").send(response.toString());
+        const song = session.musicHistory[session.index];
+        r.say(`Playing ${song.title}`);
+        const g = r.gather({ input: "dtmf", numDigits: 1, action: "/music-logic" });
+        g.play(song.url);
+        r.redirect("/music-mode");
+        return res.type("text/xml").send(r.toString());
     }
 
-    response.say("Say a song name.");
-    response.redirect("/music-mode");
-    res.type("text/xml").send(response.toString());
+    if (text) {
+        startDownload(sid, text); 
+        r.say("Searching...");
+        r.redirect("/music-wait"); 
+        return res.type("text/xml").send(r.toString());
+    }
+
+    r.say("Say a song name.");
+    r.redirect("/music-mode");
+    res.type("text/xml").send(r.toString());
 });
 
 // ---------------------------------------------------------
-// 🔄 ROUTE: WAIT LOOP (Keeps Call Alive)
+// 🔄 ROUTE: WAIT LOOP
 // ---------------------------------------------------------
-app.post("/music-check-status", (req, res) => {
-    const response = new VoiceResponse();
-    const callSid = req.body.CallSid;
-    const download = downloadQueue.get(callSid);
+app.post("/music-wait", (req, res) => {
+    const r = new VoiceResponse();
+    const sid = req.body.CallSid;
+    const dl = downloadQueue.get(sid);
 
-    if (!download) { // Should not happen, but safety check
-        response.say("Error.");
-        response.redirect("/music-mode");
-        return res.type("text/xml").send(response.toString());
-    }
+    if (!dl) { r.say("Error."); r.redirect("/music-mode"); return res.type("text/xml").send(r.toString()); }
 
-    // CASE 1: Still downloading? -> Wait and check again.
-    if (download.status === 'pending') {
-        // If it takes too long (> 60 seconds), give up to avoid Twilio timeout
-        if (Date.now() - download.startTime > 60000) {
-            response.say("Took too long to download.");
-            downloadQueue.delete(callSid); // Clean up
-            response.redirect("/music-mode");
-            return res.type("text/xml").send(response.toString());
+    if (dl.status === 'pending') {
+        if (Date.now() - dl.startTime > 60000) {
+            r.say("Took too long."); r.redirect("/music-mode"); return res.type("text/xml").send(r.toString());
         }
-        
-        response.pause({ length: 3 }); // Wait 3 seconds before checking again
-        response.redirect("/music-check-status"); // Loop back
-        return res.type("text/xml").send(response.toString());
+        r.pause({ length: 2 });
+        r.redirect("/music-wait"); 
+        return res.type("text/xml").send(r.toString());
     }
 
-    // CASE 2: Download failed
-    if (download.status === 'error') {
-        response.say("Download failed.");
-        downloadQueue.delete(callSid); // Clean up
-        response.redirect("/music-mode");
-        return res.type("text/xml").send(response.toString());
+    if (dl.status === 'error') {
+        r.say("Download failed."); r.redirect("/music-mode"); return res.type("text/xml").send(r.toString());
     }
 
-    // CASE 3: Download Complete! -> Play the song.
-    if (download.status === 'done') {
-        const session = getSession(callSid);
-        session.musicHistory.push({ title: download.title, url: download.url });
+    if (dl.status === 'done') {
+        const session = getSession(sid);
+        session.musicHistory.push({ title: dl.title, url: dl.url });
         session.index = session.musicHistory.length - 1;
 
-        response.say(`Playing ${download.title}`);
-        const gather = response.gather({ input: "dtmf", numDigits: 1, action: "/music-logic" });
-        gather.play(download.url);
-        
-        // Remove from queue now that it's playing
-        downloadQueue.delete(callSid);
-        
-        // After the song finishes, loop back to music mode
-        response.redirect("/music-mode"); 
-        return res.type("text/xml").send(response.toString());
+        r.say(`Playing ${dl.title}`);
+        const g = r.gather({ input: "dtmf", numDigits: 1, action: "/music-logic" });
+        g.play(dl.url);
+        r.redirect("/music-mode");
+        return res.type("text/xml").send(r.toString());
     }
 });
 
