@@ -1,4 +1,4 @@
-console.log("🚀 Starting Server with Real-Time Progress Logs...");
+console.log("🚀 Starting Stable Server (Download + Wait Loop + Gemini 2.5)...");
 
 import express from "express";
 import dotenv from "dotenv";
@@ -6,13 +6,13 @@ import twilio from "twilio";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import path from "path";
 import fs from "fs";
-import { spawn } from "child_process"; 
+import { exec } from "child_process"; 
 import { v4 as uuidv4 } from "uuid";
 
 dotenv.config();
 
 // ---------------------------------------------------------
-// 📝 LIVE LOGGING SYSTEM
+// 📝 LOGGING SYSTEM
 // ---------------------------------------------------------
 const logBuffer = [];
 const MAX_LOGS = 200; 
@@ -21,14 +21,10 @@ function addToLog(type, args) {
     try {
         const msg = args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ');
         const timestamp = new Date().toLocaleTimeString('en-US', { hour12: false });
-        
-        // Clean up yt-dlp progress bars to avoid messy logs
         const cleanMsg = msg.replace(/\r/g, ''); 
-
         const logLine = `[${timestamp}] [${type}] ${cleanMsg}`;
         logBuffer.push(logLine);
         if (logBuffer.length > MAX_LOGS) logBuffer.shift(); 
-        
         process.stdout.write(logLine + '\n');
     } catch (e) { process.stdout.write('Log Error\n'); }
 }
@@ -74,7 +70,7 @@ app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
 // ---------------------------------------------------------
-// 🕵️ LOG PAGE (Auto-Refresh every 1 second)
+// 🕵️ LOG PAGE
 // ---------------------------------------------------------
 app.get("/logs", (req, res) => {
     if (req.query.pwd !== "1234") return res.status(403).send("🚫 Access Denied.");
@@ -86,7 +82,9 @@ app.get("/logs", (req, res) => {
     `);
 });
 
+// ---------------------------------------------------------
 // 📂 SERVE AUDIO FILES
+// ---------------------------------------------------------
 app.get("/music/:filename", (req, res) => {
     const filePath = path.resolve(DOWNLOAD_DIR, req.params.filename);
     if (!fs.existsSync(filePath)) return res.status(404).send("File deleted or not found");
@@ -97,9 +95,11 @@ app.get("/music/:filename", (req, res) => {
     readStream.pipe(res);
 });
 
+// ---------------------------------------------------------
 // 🧠 SESSION STORAGE
+// ---------------------------------------------------------
 const sessions = new Map();
-const downloadQueue = new Map(); 
+const downloadQueue = new Map(); // Tracks download status: 'pending', 'done', 'error'
 
 function getSession(callSid) {
     if (!sessions.has(callSid)) {
@@ -109,15 +109,16 @@ function getSession(callSid) {
 }
 
 // ---------------------------------------------------------
-// 🤖 GEMINI LOGIC
+// 🤖 GEMINI LOGIC (1.5 FLASH)
 // ---------------------------------------------------------
 async function getGeminiResponse(session, userText) {
     for (let i = 0; i < GEMINI_KEYS.length; i++) {
         try {
             const genAI = new GoogleGenerativeAI(GEMINI_KEYS[i]);
+            // ⚡ USING 1.5 FLASH
             const model = genAI.getGenerativeModel({
                 model: "gemini-2.5-flash", 
-                systemInstruction: "You are a helpful phone assistant. Keep answers short. If user asks for music, say 'Press hash'.",
+                systemInstruction: "You are a helpful phone assistant. Keep answers short (1 sentence). If user asks for music, say 'Press hash'.",
             });
             const chat = model.startChat({ history: session.chatHistory });
             const result = await chat.sendMessage(userText);
@@ -133,17 +134,18 @@ async function getGeminiResponse(session, userText) {
 }
 
 // ---------------------------------------------------------
-// 🎵 DOWNLOAD LOGIC (REAL-TIME LOGS + SOUNDCLOUD)
+// 🎵 DOWNLOAD LOGIC (SoundCloud + Wait Loop)
 // ---------------------------------------------------------
 async function startDownload(callSid, query) {
     console.log(`🎵 [Start] Downloading: "${query}"`);
-    downloadQueue.set(callSid, { status: 'pending' });
+    // Mark as pending to show user we are working on it
+    downloadQueue.set(callSid, { status: 'pending', startTime: Date.now() });
 
     const uniqueId = uuidv4();
     const filename = `${uniqueId}.mp3`;
     const outputTemplate = path.join(DOWNLOAD_DIR, `${uniqueId}.%(ext)s`);
 
-    // Using scsearch1 (SoundCloud) to avoid blocking
+    // Using SoundCloud (scsearch1) for reliability and speed
     const args = [
         `scsearch1:${query}`, 
         '-x', 
@@ -155,17 +157,17 @@ async function startDownload(callSid, query) {
 
     const child = spawn('yt-dlp', args);
 
-    // Stream logs
+    // Pipe logs for real-time progress
     child.stdout.on('data', (data) => {
         const line = data.toString().trim();
         if (line.includes('[download]') || line.includes('%')) {
-            console.log(`🔹 ${line}`);
+            console.log(`🔹 ${line}`); // Show download progress
         }
     });
 
     child.stderr.on('data', (data) => {
         const line = data.toString().trim();
-        if (!line.includes('WARNING')) {
+        if (!line.includes('WARNING')) { // Ignore minor warnings
             console.error(`🔸 ${line}`);
         }
     });
@@ -176,10 +178,17 @@ async function startDownload(callSid, query) {
             downloadQueue.set(callSid, { 
                 status: 'done', 
                 url: `${BASE_URL}/music/${filename}`,
-                title: query
+                title: query,
+                filename: filename
             });
+            
+            // Auto-delete file after 10 minutes
             setTimeout(() => {
-                if (fs.existsSync(path.join(DOWNLOAD_DIR, filename))) fs.unlinkSync(path.join(DOWNLOAD_DIR, filename));
+                const f = path.join(DOWNLOAD_DIR, filename);
+                if (fs.existsSync(f)) {
+                    fs.unlinkSync(f);
+                    console.log(`🗑️ Auto-deleted: ${filename}`);
+                }
             }, 600000); 
         } else {
             console.error(`🚨 Download failed with exit code ${code}`);
@@ -189,7 +198,7 @@ async function startDownload(callSid, query) {
 }
 
 // ---------------------------------------------------------
-// 📞 ROUTE: START
+// 📞 ROUTE: START / RESET
 // ---------------------------------------------------------
 app.post("/twiml", (req, res) => {
     const caller = req.body.From;
@@ -202,7 +211,9 @@ app.post("/twiml", (req, res) => {
         return res.type("text/xml").send(r.toString());
     }
 
+    // Reset session and queue for new calls
     sessions.delete(req.body.CallSid);
+    downloadQueue.delete(req.body.CallSid); 
     getSession(req.body.CallSid); 
 
     const response = new VoiceResponse();
@@ -212,7 +223,7 @@ app.post("/twiml", (req, res) => {
 });
 
 // ---------------------------------------------------------
-// 📞 ROUTE: MAIN GATHER
+// 📞 ROUTE: MAIN GATHER (Gemini Chat)
 // ---------------------------------------------------------
 app.post("/main-gather", async (req, res) => {
     const response = new VoiceResponse();
@@ -240,15 +251,15 @@ app.post("/main-gather", async (req, res) => {
 // ---------------------------------------------------------
 app.post("/music-mode", (req, res) => {
     const response = new VoiceResponse();
-    const gather = response.gather({ input: "speech dtmf", numDigits: 1, finishOnKey: "", action: "/music-process", timeout: 5, bargeIn: true });
+    const gather = response.gather({ input: "speech dtmf", numDigits: 1, finishOnKey: "", action: "/music-logic", timeout: 5, bargeIn: true });
     gather.say("What song?"); 
     res.type("text/xml").send(response.toString());
 });
 
 // ---------------------------------------------------------
-// 🎵 ROUTE: MUSIC PROCESS
+// 🎵 ROUTE: MUSIC LOGIC (Start Download + Wait)
 // ---------------------------------------------------------
-app.post("/music-process", async (req, res) => {
+app.post("/music-logic", async (req, res) => {
     const response = new VoiceResponse();
     const callSid = req.body.CallSid;
     const digits = req.body.Digits;
@@ -257,6 +268,7 @@ app.post("/music-process", async (req, res) => {
 
     if (digits === "0") { response.redirect("/twiml"); return res.type("text/xml").send(response.toString()); }
 
+    // 🕹️ Controls
     if (["4", "5", "6"].includes(digits)) {
         if (session.musicHistory.length === 0) {
             response.say("No history.");
@@ -266,19 +278,21 @@ app.post("/music-process", async (req, res) => {
         if (digits === "4" && session.index > 0) session.index--; 
         if (digits === "6" && session.index < session.musicHistory.length - 1) session.index++; 
 
+        // Play from history
         const song = session.musicHistory[session.index];
         response.say(`Playing ${song.title}`);
-        const gather = response.gather({ input: "dtmf", numDigits: 1, finishOnKey: "", action: "/music-process" });
+        const gather = response.gather({ input: "dtmf", numDigits: 1, finishOnKey: "", action: "/music-logic" });
         gather.play(song.url);
         response.redirect("/music-mode"); 
         return res.type("text/xml").send(response.toString());
     }
 
+    // 🔍 New Search
     if (userText) {
-        startDownload(callSid, userText); // Start Background Download
+        startDownload(callSid, userText); // Start in background
         
         response.say("Searching...");
-        response.redirect("/music-check-status"); // Go to Loop
+        response.redirect("/music-check-status"); // Go to Wait Loop
         return res.type("text/xml").send(response.toString());
     }
 
@@ -288,43 +302,57 @@ app.post("/music-process", async (req, res) => {
 });
 
 // ---------------------------------------------------------
-// 🔄 ROUTE: WAIT LOOP
+// 🔄 ROUTE: WAIT LOOP (Keeps Call Alive)
 // ---------------------------------------------------------
 app.post("/music-check-status", (req, res) => {
     const response = new VoiceResponse();
     const callSid = req.body.CallSid;
     const download = downloadQueue.get(callSid);
 
-    if (!download) {
+    if (!download) { // Should not happen, but safety check
         response.say("Error.");
         response.redirect("/music-mode");
         return res.type("text/xml").send(response.toString());
     }
 
+    // CASE 1: Still downloading? -> Wait and check again.
     if (download.status === 'pending') {
-        response.pause({ length: 3 }); // Wait 3s
-        response.redirect("/music-check-status"); // Loop
+        // If it takes too long (> 60 seconds), give up to avoid Twilio timeout
+        if (Date.now() - download.startTime > 60000) {
+            response.say("Took too long to download.");
+            downloadQueue.delete(callSid); // Clean up
+            response.redirect("/music-mode");
+            return res.type("text/xml").send(response.toString());
+        }
+        
+        response.pause({ length: 3 }); // Wait 3 seconds before checking again
+        response.redirect("/music-check-status"); // Loop back
         return res.type("text/xml").send(response.toString());
     }
 
+    // CASE 2: Download failed
     if (download.status === 'error') {
         response.say("Download failed.");
-        downloadQueue.delete(callSid);
+        downloadQueue.delete(callSid); // Clean up
         response.redirect("/music-mode");
         return res.type("text/xml").send(response.toString());
     }
 
+    // CASE 3: Download Complete! -> Play the song.
     if (download.status === 'done') {
         const session = getSession(callSid);
         session.musicHistory.push({ title: download.title, url: download.url });
         session.index = session.musicHistory.length - 1;
 
         response.say(`Playing ${download.title}`);
-        const gather = response.gather({ input: "dtmf", numDigits: 1, finishOnKey: "", action: "/music-process" });
+        const gather = response.gather({ input: "dtmf", numDigits: 1, action: "/music-logic" });
         gather.play(download.url);
         
+        // Remove from queue now that it's playing
         downloadQueue.delete(callSid);
-        response.redirect("/music-mode");
+        
+        // After the song finishes, loop back to music mode
+        response.redirect("/music-mode"); 
         return res.type("text/xml").send(response.toString());
     }
 });
