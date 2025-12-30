@@ -1,4 +1,4 @@
-console.log("🚀 Starting Server: Final Production Build (Verified)...");
+console.log("🚀 Starting Server: Smart File Detection & Logs...");
 
 import express from "express";
 import dotenv from "dotenv";
@@ -12,14 +12,11 @@ import { v4 as uuidv4 } from "uuid";
 dotenv.config();
 
 // ==============================================================================
-// ⚙️ SETTINGS & CONFIGURATION
+// ⚙️ SETTINGS
 // ==============================================================================
 const CONFIG = {
     PORT: process.env.PORT || 3000,
-    
-    // 🟢 The Correct URL for your App
     BASE_URL: process.env.RENDER_EXTERNAL_URL || "https://yt-dlp-gemini-ai-call.onrender.com", 
-
     DOWNLOAD_DIR: "/tmp",
     
     VERIFIED_CALLERS: [
@@ -69,7 +66,7 @@ const getSession = (callSid) => {
     return sessions.get(callSid);
 };
 
-// 1. AI SERVICE (Gemini 2.5)
+// 1. AI SERVICE
 async function askGemini(session, text) {
     if (CONFIG.GEMINI_KEYS.length === 0) return "No API Keys.";
     for (const key of CONFIG.GEMINI_KEYS) {
@@ -90,44 +87,58 @@ async function askGemini(session, text) {
     return "Brain offline.";
 }
 
-// 2. MUSIC SERVICE (With Verification)
+// 2. MUSIC SERVICE (Smart Detection)
 async function searchAndDownload(callSid, query) {
     console.log(`🎵 [Download Request] ${query}`);
     downloadQueue.set(callSid, { status: 'pending', startTime: Date.now() });
 
     const id = uuidv4();
-    const filename = `${id}.mp3`;
-    const outputPath = path.join(CONFIG.DOWNLOAD_DIR, `${id}.%(ext)s`);
+    // We don't force .mp3 in the check anymore, we look for what actually arrives
+    const outputTemplate = path.join(CONFIG.DOWNLOAD_DIR, `${id}.%(ext)s`);
 
     const args = [
         `scsearch5:${query}`,
-        '--match-filter', 'duration > 60',
+        '--match-filter', 'duration > 60', // ⚠️ Matches > 60s only
         '-I', '1',
         '-x', '--audio-format', 'mp3',
         '--postprocessor-args', 'ffmpeg:-ac 1 -ar 16000',
-        '--no-playlist', '--force-ipv4', '-o', outputPath
+        '--no-playlist', '--force-ipv4', '-o', outputTemplate
     ];
 
     const child = spawn('yt-dlp', args);
 
+    // 🔍 X-RAY LOGS: See exactly what the downloader is saying
+    child.stdout.on('data', (data) => {
+        const line = data.toString();
+        if (line.includes('[download]') || line.includes('Deleting')) console.log(`🔹 ${line.trim()}`);
+    });
+    child.stderr.on('data', (data) => console.log(`🔸 ${data.toString().trim()}`));
+
     child.on('close', (code) => {
-        const expectedFile = path.join(CONFIG.DOWNLOAD_DIR, filename);
+        // 🛠️ SMART FINDER: Look for ANY file starting with this UUID
+        // This handles cases where conversion failed (left as .m4a) OR success (.mp3)
+        const files = fs.readdirSync(CONFIG.DOWNLOAD_DIR);
+        const foundFile = files.find(f => f.startsWith(id));
 
-        // 🔍 THE FIX: Physically check if the file exists before saying "Done"
-        if (code === 0 && fs.existsSync(expectedFile)) {
-            const stats = fs.statSync(expectedFile);
-            console.log(`✅ [File Verified] ${filename} (${stats.size} bytes)`);
-            
-            downloadQueue.set(callSid, {
-                status: 'done',
-                url: `${CONFIG.BASE_URL}/music/${filename}`,
-                title: query
-            });
+        if (foundFile) {
+            const fullPath = path.join(CONFIG.DOWNLOAD_DIR, foundFile);
+            const stats = fs.statSync(fullPath);
+            console.log(`✅ [File Found] ${foundFile} (${stats.size} bytes)`);
 
-            // Cleanup after 10 mins
-            setTimeout(() => { if (fs.existsSync(expectedFile)) fs.unlinkSync(expectedFile); }, 600000);
+            if (stats.size > 10000) {
+                downloadQueue.set(callSid, {
+                    status: 'done',
+                    url: `${CONFIG.BASE_URL}/music/${foundFile}`,
+                    title: query
+                });
+                setTimeout(() => { if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath); }, 600000);
+            } else {
+                console.error("⚠️ File too small (silence).");
+                downloadQueue.set(callSid, { status: 'error' });
+            }
         } else {
-            console.error(`🚨 [Download Failed] Code: ${code}. File Exists: ${fs.existsSync(expectedFile)}`);
+            // If we are here, the FILTER blocked everything.
+            console.error(`🚨 [No File] The filter likely rejected all 5 results for being too short.`);
             downloadQueue.set(callSid, { status: 'error' });
         }
     });
@@ -143,30 +154,24 @@ const VoiceResponse = twilio.twiml.VoiceResponse;
 
 // 📂 SERVE AUDIO FILES
 app.get("/music/:filename", (req, res) => {
-    console.log(`📂 [Twilio Requesting] ${req.params.filename}`);
     const f = path.resolve(CONFIG.DOWNLOAD_DIR, req.params.filename);
-    
     if (!fs.existsSync(f)) {
-        console.error("❌ [File Missing] Twilio asked for a file that isn't here.");
+        console.error(`❌ [404] Twilio asked for ${req.params.filename} but it's gone.`);
         return res.status(404).send("File missing");
     }
-    
     const stat = fs.statSync(f);
     res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Content-Length': stat.size });
     fs.createReadStream(f).pipe(res);
 });
 
-// Logs Page
 app.get("/logs", (req, res) => {
     if (req.query.pwd !== "1234") return res.status(403).send("No.");
     res.send(`<html><meta http-equiv="refresh" content="2"><body style="background:#111;color:#0f0;font-family:monospace"><pre>${logBuffer.join("\n")}</pre></body></html>`);
 });
 
 // ==============================================================================
-// 📞 ROUTE HANDLERS
+// 📞 ROUTES
 // ==============================================================================
-
-// 1. INCOMING CALL
 app.all("/twiml", (req, res) => {
     try {
         const caller = req.body.From;
@@ -181,7 +186,6 @@ app.all("/twiml", (req, res) => {
     } catch (e) { console.error(e); res.status(500).send("Err"); }
 });
 
-// 2. MAIN CONVERSATION
 app.all("/main-gather", async (req, res) => {
     try {
         const r = new VoiceResponse();
@@ -197,7 +201,6 @@ app.all("/main-gather", async (req, res) => {
     } catch (e) { console.error(e); }
 });
 
-// 3. MUSIC MENU
 app.all("/music-mode", (req, res) => {
     const r = new VoiceResponse();
     const g = r.gather({ input: "speech dtmf", numDigits: 1, finishOnKey: "", action: "/music-logic", timeout: 5, bargeIn: true });
@@ -205,7 +208,6 @@ app.all("/music-mode", (req, res) => {
     res.type("text/xml").send(r.toString());
 });
 
-// 4. MUSIC LOGIC
 app.all("/music-logic", (req, res) => {
     const r = new VoiceResponse();
     const { CallSid, Digits, SpeechResult } = req.body;
@@ -213,7 +215,6 @@ app.all("/music-logic", (req, res) => {
 
     if (Digits === "0") { r.redirect("/twiml"); return res.type("text/xml").send(r.toString()); }
     
-    // Controls
     if (["4", "5", "6"].includes(Digits)) {
         if (session.musicHistory.length === 0) { r.say(CONFIG.MESSAGES.NO_HISTORY); r.redirect("/music-mode"); return res.type("text/xml").send(r.toString()); }
         if (Digits === "4" && session.index > 0) session.index--;
@@ -227,7 +228,6 @@ app.all("/music-logic", (req, res) => {
         return res.type("text/xml").send(r.toString());
     }
 
-    // Search
     if (SpeechResult) {
         searchAndDownload(CallSid, SpeechResult);
         r.say(CONFIG.MESSAGES.SEARCHING);
@@ -239,7 +239,6 @@ app.all("/music-logic", (req, res) => {
     res.type("text/xml").send(r.toString());
 });
 
-// 5. WAIT LOOP
 app.all("/music-wait-loop", (req, res) => {
     const r = new VoiceResponse();
     const dl = downloadQueue.get(req.body.CallSid);
@@ -266,5 +265,4 @@ app.all("/music-wait-loop", (req, res) => {
     res.type("text/xml").send(r.toString());
 });
 
-// 🟢 START SERVER
 app.listen(CONFIG.PORT, () => console.log(`🚀 Server Online on Port ${CONFIG.PORT}`));
