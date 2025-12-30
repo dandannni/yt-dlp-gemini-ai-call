@@ -1,4 +1,4 @@
-console.log("🚀 Starting Server: Final Production Build...");
+console.log("🚀 Starting Server: Final Production Build (Verified)...");
 
 import express from "express";
 import dotenv from "dotenv";
@@ -17,7 +17,7 @@ dotenv.config();
 const CONFIG = {
     PORT: process.env.PORT || 3000,
     
-    // 🟢 YOUR EXACT RENDER URL
+    // 🟢 The Correct URL for your App
     BASE_URL: process.env.RENDER_EXTERNAL_URL || "https://yt-dlp-gemini-ai-call.onrender.com", 
 
     DOWNLOAD_DIR: "/tmp",
@@ -46,10 +46,8 @@ const CONFIG = {
 };
 
 // ==============================================================================
-// 🛠️ SERVICES (THE LOGIC)
+// 🛠️ LOGGING & SERVICES
 // ==============================================================================
-
-// 1. LOGGING SERVICE
 const logBuffer = [];
 const addToLog = (type, args) => {
     try {
@@ -64,7 +62,6 @@ const addToLog = (type, args) => {
 console.log = (...args) => addToLog("INFO", args);
 console.error = (...args) => addToLog("ERROR", args);
 
-// 2. SESSION MANAGER
 const sessions = new Map();
 const downloadQueue = new Map();
 const getSession = (callSid) => {
@@ -72,32 +69,28 @@ const getSession = (callSid) => {
     return sessions.get(callSid);
 };
 
-// 3. AI SERVICE (GEMINI 2.5)
+// 1. AI SERVICE (Gemini 2.5)
 async function askGemini(session, text) {
-    if (CONFIG.GEMINI_KEYS.length === 0) return "No API Keys configured.";
-    
+    if (CONFIG.GEMINI_KEYS.length === 0) return "No API Keys.";
     for (const key of CONFIG.GEMINI_KEYS) {
         try {
             const genAI = new GoogleGenerativeAI(key);
             const model = genAI.getGenerativeModel({
                 model: "gemini-2.5-flash",
-                systemInstruction: "You are a helpful phone assistant. Keep answers short (1-2 sentences). If asked for music, say 'Press hash'.",
+                systemInstruction: "You are a phone assistant. Keep answers short. If asked for music, say 'Press hash'.",
             });
             const chat = model.startChat({ history: session.chatHistory });
             const result = await chat.sendMessage(text);
             const response = result.response.text();
-            
             session.chatHistory.push({ role: "user", parts: [{ text }] });
             session.chatHistory.push({ role: "model", parts: [{ text: response }] });
             return response;
-        } catch (e) {
-            console.error(`⚠️ AI Key Failed: ${e.message}`);
-        }
+        } catch (e) {}
     }
-    return "I cannot connect to my brain right now.";
+    return "Brain offline.";
 }
 
-// 4. MUSIC SERVICE (DOWNLOADER)
+// 2. MUSIC SERVICE (With Verification)
 async function searchAndDownload(callSid, query) {
     console.log(`🎵 [Download Request] ${query}`);
     downloadQueue.set(callSid, { status: 'pending', startTime: Date.now() });
@@ -106,7 +99,6 @@ async function searchAndDownload(callSid, query) {
     const filename = `${id}.mp3`;
     const outputPath = path.join(CONFIG.DOWNLOAD_DIR, `${id}.%(ext)s`);
 
-    // Anti-Preview Command (Filters < 60s, mono audio)
     const args = [
         `scsearch5:${query}`,
         '--match-filter', 'duration > 60',
@@ -119,25 +111,23 @@ async function searchAndDownload(callSid, query) {
     const child = spawn('yt-dlp', args);
 
     child.on('close', (code) => {
-        if (code === 0) {
-            // Construct the EXACT Public URL
-            const fileUrl = `${CONFIG.BASE_URL}/music/${filename}`;
-            console.log(`✅ [Ready] ${filename}`);
-            console.log(`🔗 [Sending URL] ${fileUrl}`); 
+        const expectedFile = path.join(CONFIG.DOWNLOAD_DIR, filename);
 
+        // 🔍 THE FIX: Physically check if the file exists before saying "Done"
+        if (code === 0 && fs.existsSync(expectedFile)) {
+            const stats = fs.statSync(expectedFile);
+            console.log(`✅ [File Verified] ${filename} (${stats.size} bytes)`);
+            
             downloadQueue.set(callSid, {
                 status: 'done',
-                url: fileUrl,
+                url: `${CONFIG.BASE_URL}/music/${filename}`,
                 title: query
             });
 
-            // Cleanup 10m
-            setTimeout(() => {
-                const f = path.join(CONFIG.DOWNLOAD_DIR, filename);
-                if (fs.existsSync(f)) fs.unlinkSync(f);
-            }, 600000);
+            // Cleanup after 10 mins
+            setTimeout(() => { if (fs.existsSync(expectedFile)) fs.unlinkSync(expectedFile); }, 600000);
         } else {
-            console.error(`🚨 [Failed] Code ${code}`);
+            console.error(`🚨 [Download Failed] Code: ${code}. File Exists: ${fs.existsSync(expectedFile)}`);
             downloadQueue.set(callSid, { status: 'error' });
         }
     });
@@ -151,17 +141,18 @@ app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 const VoiceResponse = twilio.twiml.VoiceResponse;
 
-// Serve Audio Files
+// 📂 SERVE AUDIO FILES
 app.get("/music/:filename", (req, res) => {
+    console.log(`📂 [Twilio Requesting] ${req.params.filename}`);
     const f = path.resolve(CONFIG.DOWNLOAD_DIR, req.params.filename);
-    if (!fs.existsSync(f)) return res.status(404).send("File missing");
     
-    // Explicit Headers for Twilio Stability
+    if (!fs.existsSync(f)) {
+        console.error("❌ [File Missing] Twilio asked for a file that isn't here.");
+        return res.status(404).send("File missing");
+    }
+    
     const stat = fs.statSync(f);
-    res.writeHead(200, { 
-        'Content-Type': 'audio/mpeg', 
-        'Content-Length': stat.size 
-    });
+    res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Content-Length': stat.size });
     fs.createReadStream(f).pipe(res);
 });
 
@@ -180,41 +171,26 @@ app.all("/twiml", (req, res) => {
     try {
         const caller = req.body.From;
         console.log(`📞 [New Call] ${caller}`);
-
-        if (!CONFIG.VERIFIED_CALLERS.includes(caller)) {
-            const r = new VoiceResponse(); r.reject(); return res.type("text/xml").send(r.toString());
-        }
+        if (!CONFIG.VERIFIED_CALLERS.includes(caller)) { const r = new VoiceResponse(); r.reject(); return res.type("text/xml").send(r.toString()); }
 
         sessions.delete(req.body.CallSid);
         const r = new VoiceResponse();
         r.say(CONFIG.MESSAGES.WELCOME);
-        r.gather({ 
-            input: "speech dtmf", numDigits: 1, finishOnKey: "", 
-            action: "/main-gather", method: "POST", timeout: 5, bargeIn: true 
-        });
+        r.gather({ input: "speech dtmf", numDigits: 1, finishOnKey: "", action: "/main-gather", method: "POST", timeout: 5, bargeIn: true });
         res.type("text/xml").send(r.toString());
     } catch (e) { console.error(e); res.status(500).send("Err"); }
 });
 
-// 2. MAIN CONVERSATION LOOP
+// 2. MAIN CONVERSATION
 app.all("/main-gather", async (req, res) => {
     try {
         const r = new VoiceResponse();
         const { CallSid, Digits, SpeechResult } = req.body;
         
-        if (Digits === "#") {
-            console.log("🔀 Switching to Music Mode");
-            r.redirect("/music-mode");
-            return res.type("text/xml").send(r.toString());
-        }
-
-        if (!SpeechResult && !Digits) {
-            r.gather({ input: "speech dtmf", numDigits: 1, finishOnKey: "", action: "/main-gather" });
-            return res.type("text/xml").send(r.toString());
-        }
+        if (Digits === "#") { r.redirect("/music-mode"); return res.type("text/xml").send(r.toString()); }
+        if (!SpeechResult && !Digits) { r.gather({ input: "speech dtmf", numDigits: 1, finishOnKey: "", action: "/main-gather" }); return res.type("text/xml").send(r.toString()); }
 
         const reply = await askGemini(getSession(CallSid), SpeechResult);
-        console.log(`🤖 AI: ${reply}`);
         r.say(reply);
         r.gather({ input: "speech dtmf", numDigits: 1, finishOnKey: "", action: "/main-gather" });
         res.type("text/xml").send(r.toString());
@@ -224,26 +200,22 @@ app.all("/main-gather", async (req, res) => {
 // 3. MUSIC MENU
 app.all("/music-mode", (req, res) => {
     const r = new VoiceResponse();
-    console.log("🎵 Music Mode Active");
     const g = r.gather({ input: "speech dtmf", numDigits: 1, finishOnKey: "", action: "/music-logic", timeout: 5, bargeIn: true });
     g.say(CONFIG.MESSAGES.MUSIC_WELCOME);
     res.type("text/xml").send(r.toString());
 });
 
-// 4. MUSIC CONTROLS & SEARCH
+// 4. MUSIC LOGIC
 app.all("/music-logic", (req, res) => {
     const r = new VoiceResponse();
     const { CallSid, Digits, SpeechResult } = req.body;
     const session = getSession(CallSid);
 
     if (Digits === "0") { r.redirect("/twiml"); return res.type("text/xml").send(r.toString()); }
-
+    
+    // Controls
     if (["4", "5", "6"].includes(Digits)) {
-        if (session.musicHistory.length === 0) {
-            r.say(CONFIG.MESSAGES.NO_HISTORY);
-            r.redirect("/music-mode");
-            return res.type("text/xml").send(r.toString());
-        }
+        if (session.musicHistory.length === 0) { r.say(CONFIG.MESSAGES.NO_HISTORY); r.redirect("/music-mode"); return res.type("text/xml").send(r.toString()); }
         if (Digits === "4" && session.index > 0) session.index--;
         if (Digits === "6" && session.index < session.musicHistory.length - 1) session.index++;
         
@@ -255,19 +227,19 @@ app.all("/music-logic", (req, res) => {
         return res.type("text/xml").send(r.toString());
     }
 
+    // Search
     if (SpeechResult) {
         searchAndDownload(CallSid, SpeechResult);
         r.say(CONFIG.MESSAGES.SEARCHING);
         r.redirect("/music-wait-loop");
         return res.type("text/xml").send(r.toString());
     }
-
     r.say("I didn't catch that.");
     r.redirect("/music-mode");
     res.type("text/xml").send(r.toString());
 });
 
-// 5. WAIT LOOP (POLLING)
+// 5. WAIT LOOP
 app.all("/music-wait-loop", (req, res) => {
     const r = new VoiceResponse();
     const dl = downloadQueue.get(req.body.CallSid);
@@ -281,10 +253,7 @@ app.all("/music-wait-loop", (req, res) => {
 
         r.say(`Playing ${dl.title}`);
         const g = r.gather({ input: "dtmf", numDigits: 1, finishOnKey: "", action: "/music-logic" });
-        
-        // Uses the CORRECT base URL now
-        g.play(dl.url); 
-        
+        g.play(dl.url);
         r.redirect("/music-mode");
     } else if (dl.status === 'error' || Date.now() - dl.startTime > 60000) {
         r.say("Download failed.");
@@ -297,5 +266,5 @@ app.all("/music-wait-loop", (req, res) => {
     res.type("text/xml").send(r.toString());
 });
 
-// 🟢 MAKE SURE YOU COPY THIS LAST LINE!
+// 🟢 START SERVER
 app.listen(CONFIG.PORT, () => console.log(`🚀 Server Online on Port ${CONFIG.PORT}`));
