@@ -1,4 +1,4 @@
-console.log("🚀 Starting Server: Friendly Mode + Hash Fix...");
+console.log("🚀 Starting Server: Anti-Preview Mode (Filter < 60s)...");
 
 import express from "express";
 import dotenv from "dotenv";
@@ -12,7 +12,7 @@ import { v4 as uuidv4 } from "uuid";
 dotenv.config();
 
 // ---------------------------------------------------------
-// 📝 LOGGING (Debug Mode)
+// 📝 LOGGING
 // ---------------------------------------------------------
 const logBuffer = [];
 const MAX_LOGS = 200;
@@ -59,7 +59,6 @@ const VERIFIED_CALLERS = [
 ];
 
 const PORT = process.env.PORT || 3000;
-// We use a Relative Path strategy now (Safer for Render)
 const BASE_URL = process.env.RENDER_EXTERNAL_URL || ""; 
 const DOWNLOAD_DIR = "/tmp";
 
@@ -118,7 +117,7 @@ async function getGeminiResponse(session, userText) {
 }
 
 // ---------------------------------------------------------
-// 🎵 DOWNLOAD LOGIC (Mono/16k Optimization)
+// 🎵 DOWNLOAD LOGIC (FIXED: Filters out short previews)
 // ---------------------------------------------------------
 async function startDownload(callSid, query) {
     console.log(`🎵 [Download Start] ${query}`);
@@ -128,10 +127,16 @@ async function startDownload(callSid, query) {
     const filename = `${uniqueId}.mp3`;
     const outputTemplate = path.join(DOWNLOAD_DIR, `${uniqueId}.%(ext)s`);
 
+    // 🛠 UPDATED COMMAND:
+    // scsearch5: Look at top 5 results (instead of just 1)
+    // --match-filter "duration > 60": IGNORE anything shorter than 60 seconds (Previews)
+    // -I 1: Download only the first one that matches the filter
     const args = [
-        `scsearch1:${query}`,
+        `scsearch5:${query}`,
+        '--match-filter', 'duration > 60', 
+        '-I', '1',
         '-x', '--audio-format', 'mp3',
-        '--postprocessor-args', 'ffmpeg:-ac 1 -ar 16000', // Small, fast file
+        '--postprocessor-args', 'ffmpeg:-ac 1 -ar 16000',
         '--no-playlist', '--force-ipv4', '-o', outputTemplate
     ];
 
@@ -140,8 +145,7 @@ async function startDownload(callSid, query) {
     child.on('close', (code) => {
         if (code === 0) {
             console.log(`✅ [Download Done] ${filename}`);
-            // Construct Full URL for Playback
-            const host = BASE_URL || `https://localhost:${PORT}`; // Fallback if env missing
+            const host = BASE_URL || `https://localhost:${PORT}`; 
             downloadQueue.set(callSid, {
                 status: 'done',
                 url: `${host}/music/${filename}`,
@@ -149,7 +153,7 @@ async function startDownload(callSid, query) {
             });
             setTimeout(() => { if (fs.existsSync(path.join(DOWNLOAD_DIR, filename))) fs.unlinkSync(path.join(DOWNLOAD_DIR, filename)); }, 600000);
         } else {
-            console.error(`🚨 [Download Fail] Code: ${code}`);
+            console.error(`🚨 [Download Fail] Code: ${code} (Maybe no full songs found?)`);
             downloadQueue.set(callSid, { status: 'error' });
         }
     });
@@ -158,7 +162,6 @@ async function startDownload(callSid, query) {
 // ---------------------------------------------------------
 // 📞 ROUTE: START (/twiml)
 // ---------------------------------------------------------
-// Using app.all to handle both GET/POST (fixes Redirect bugs)
 app.all("/twiml", (req, res) => {
     try {
         const caller = req.body.From;
@@ -171,10 +174,8 @@ app.all("/twiml", (req, res) => {
         sessions.delete(req.body.CallSid);
         const r = new VoiceResponse();
         
-        // 👋 NEW CHEERFUL MESSAGE
-        r.say("Hello! I am your AI assistant. You can ask me anything, or press the Hash key to play music.");
+        r.say("Hello! Speak to me, or press Hash for music.");
         
-        // 🔧 THE FIX: finishOnKey="" ensures '#' is treated as a digit, not 'Enter'
         r.gather({ 
             input: "speech dtmf", 
             numDigits: 1, 
@@ -193,7 +194,7 @@ app.all("/twiml", (req, res) => {
 });
 
 // ---------------------------------------------------------
-// 📞 ROUTE: MAIN GATHER (The Chat)
+// 📞 ROUTE: MAIN GATHER
 // ---------------------------------------------------------
 app.all("/main-gather", async (req, res) => {
     try {
@@ -205,7 +206,6 @@ app.all("/main-gather", async (req, res) => {
 
         console.log(`📝 [Main Gather] Digits: "${digits}" | Speech: "${userText}"`);
 
-        // #️⃣ DETECT HASH KEY
         if (digits === "#") { 
             console.log("🔀 User pressed #. Redirecting to Music Mode...");
             r.redirect("/music-mode"); 
@@ -213,23 +213,17 @@ app.all("/main-gather", async (req, res) => {
         }
 
         if (!userText && !digits) {
-            console.log("🤔 Silence. Listening again.");
             r.gather({ input: "speech dtmf", numDigits: 1, finishOnKey: "", action: "/main-gather" });
             return res.type("text/xml").send(r.toString());
         }
 
-        // 🤖 AI REPLY
         const reply = await getGeminiResponse(session, userText);
         console.log(`🤖 AI: ${reply}`);
         r.say(reply);
         r.gather({ input: "speech dtmf", numDigits: 1, finishOnKey: "", action: "/main-gather" });
         
         res.type("text/xml").send(r.toString());
-
-    } catch (e) {
-        console.error("CRASH /main-gather:", e);
-        const r = new VoiceResponse(); r.say("System error."); res.type("text/xml").send(r.toString());
-    }
+    } catch (e) { console.error("CRASH /main-gather:", e); }
 });
 
 // ---------------------------------------------------------
@@ -249,10 +243,7 @@ app.all("/music-mode", (req, res) => {
         });
         gather.say("Music Mode. Name a song.");
         res.type("text/xml").send(r.toString());
-    } catch (e) {
-        console.error("CRASH /music-mode:", e);
-        res.status(500).send("Error");
-    }
+    } catch (e) { console.error("CRASH /music-mode:", e); }
 });
 
 // ---------------------------------------------------------
@@ -286,7 +277,7 @@ app.all("/music-logic", async (req, res) => {
             return res.type("text/xml").send(r.toString());
         }
 
-        // New Search
+        // Search
         if (userText) {
             startDownload(callSid, userText);
             r.say("Searching...");
@@ -331,9 +322,6 @@ app.all("/music-wait-loop", (req, res) => {
     return res.type("text/xml").send(r.toString());
 });
 
-// ---------------------------------------------------------
-// 🕵️ LOG PAGE
-// ---------------------------------------------------------
 app.get("/logs", (req, res) => {
     if (req.query.pwd !== "1234") return res.status(403).send("Denied");
     res.send(`<html><meta http-equiv="refresh" content="2"><body style="background:#000;color:#0f0;font-family:monospace"><pre>${logBuffer.join("\n")}</pre></body></html>`);
