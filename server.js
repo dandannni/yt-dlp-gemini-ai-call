@@ -1,4 +1,4 @@
-console.log("🚀 Starting Server with Bulletproof Audio Headers...");
+console.log("🚀 Starting Server: Gemini 2.5 Flash + Optimized Audio...");
 
 import express from "express";
 import dotenv from "dotenv";
@@ -6,26 +6,37 @@ import twilio from "twilio";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import path from "path";
 import fs from "fs";
-import { exec } from "child_process";
+import { spawn } from "child_process";
 import { v4 as uuidv4 } from "uuid";
 
 dotenv.config();
 
 // ---------------------------------------------------------
-// 📝 LIVE LOGGING
+// 📝 LOGGING SYSTEM
 // ---------------------------------------------------------
 const logBuffer = [];
-const MAX_LOGS = 100;
+const MAX_LOGS = 200;
+
 function addToLog(type, args) {
     try {
-        const msg = args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ');
+        const msg = args.map(a => {
+            if (a instanceof Error) return a.message + '\n' + a.stack;
+            if (typeof a === 'object') return JSON.stringify(a);
+            return String(a);
+        }).join(' ');
+
         const timestamp = new Date().toLocaleTimeString('en-US', { hour12: false });
-        const logLine = `[${timestamp}] [${type}] ${msg}`;
+        // Clean logs
+        const cleanMsg = msg.replace(/\r/g, '').replace(/\x1b\[[0-9;]*m/g, '');
+
+        const logLine = `[${timestamp}] [${type}] ${cleanMsg}`;
         logBuffer.push(logLine);
-        if (logBuffer.length > MAX_LOGS) logBuffer.shift(); 
+        if (logBuffer.length > MAX_LOGS) logBuffer.shift();
+
         process.stdout.write(logLine + '\n');
     } catch (e) { process.stdout.write('Log Error\n'); }
 }
+
 console.log = (...args) => addToLog("INFO", args);
 console.error = (...args) => addToLog("ERROR", args);
 console.warn = (...args) => addToLog("WARN", args);
@@ -38,26 +49,22 @@ const GEMINI_KEYS = [
     process.env.GEMINI_API_KEY_2,
     process.env.GEMINI_API_KEY_3,
     process.env.GEMINI_API_KEY_4
-].filter(key => key); 
+].filter(key => key);
 
 if (GEMINI_KEYS.length === 0) console.error("❌ NO GEMINI API KEYS FOUND!");
 else console.log(`✅ Loaded ${GEMINI_KEYS.length} Gemini Keys.`);
 
 const VERIFIED_CALLERS = [
-    "+972548498889", 
-    "+972554402506", 
-    "+972525585720", 
-    "+972528263032", 
+    "+972548498889",
+    "+972554402506",
+    "+972525585720",
+    "+972528263032",
     "+972583230268"
 ];
 
 const PORT = process.env.PORT || 3000;
 const BASE_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
-const DOWNLOAD_DIR = "/tmp"; 
-
-// Crash logging
-process.on("uncaughtException", err => console.error("UNCAUGHT:", err));
-process.on("unhandledRejection", err => console.error("UNHANDLED:", err));
+const DOWNLOAD_DIR = "/tmp";
 
 const { twiml } = twilio;
 const VoiceResponse = twiml.VoiceResponse;
@@ -71,20 +78,24 @@ app.use(express.json());
 // ---------------------------------------------------------
 app.get("/logs", (req, res) => {
     if (req.query.pwd !== "1234") return res.status(403).send("🚫 Access Denied.");
-    res.send(`<html><head><title>Logs</title><meta http-equiv="refresh" content="2"><style>body{background:#111;color:#0f0;font-family:monospace;padding:10px;}</style></head><body><h3>📜 Live Logs</h3><pre>${logBuffer.join("\n")}</pre></body></html>`);
+    res.send(`
+        <html><head><title>Bot Logs</title>
+        <meta http-equiv="refresh" content="2">
+        <style>body{background:#111;color:#0f0;font-family:monospace;padding:10px;font-size:12px;}</style>
+        </head><body><h3>📜 System Logs</h3><pre>${logBuffer.join("\n")}</pre></body></html>
+    `);
 });
 
-// 📂 SERVE AUDIO FILES (WITH HEADERS FOR TWILIO)
+// 📂 SERVE AUDIO FILES
 app.get("/music/:filename", (req, res) => {
     const filePath = path.resolve(DOWNLOAD_DIR, req.params.filename);
-    
+
     if (!fs.existsSync(filePath)) {
         return res.status(404).send("File deleted or not found");
     }
 
-    // 🛑 SAFETY: Explicitly tell Twilio this is an MP3
-    // If we don't send this, Twilio might reject the file.
     const stat = fs.statSync(filePath);
+    // Explicit headers are crucial for Twilio stability
     res.writeHead(200, {
         'Content-Type': 'audio/mpeg',
         'Content-Length': stat.size
@@ -94,9 +105,9 @@ app.get("/music/:filename", (req, res) => {
     readStream.pipe(res);
 });
 
-// 🧠 SESSION STORAGE
+// 🧠 STATE MANAGEMENT
 const sessions = new Map();
-const downloadQueue = new Map(); // Stores download status
+const downloadQueue = new Map();
 
 function getSession(callSid) {
     if (!sessions.has(callSid)) {
@@ -106,204 +117,225 @@ function getSession(callSid) {
 }
 
 // ---------------------------------------------------------
-// 🤖 GEMINI LOGIC
+// 🤖 GEMINI LOGIC (2.5 Flash)
 // ---------------------------------------------------------
 async function getGeminiResponse(session, userText) {
     for (let i = 0; i < GEMINI_KEYS.length; i++) {
         try {
             const genAI = new GoogleGenerativeAI(GEMINI_KEYS[i]);
+            // ⚡ UPDATED TO GEMINI 2.5 FLASH
             const model = genAI.getGenerativeModel({
                 model: "gemini-2.5-flash", 
-                systemInstruction: "You are a helpful phone assistant. Keep answers short. If user asks for music, say 'Press hash'.",
+                systemInstruction: "You are a witty phone assistant. Keep answers brief (max 2 sentences). If the user asks for music or songs, explicitly tell them to 'Press Hash'.",
             });
+
             const chat = model.startChat({ history: session.chatHistory });
             const result = await chat.sendMessage(userText);
-            const responseText = result.response.text();
+            const text = result.response.text();
+
             session.chatHistory.push({ role: "user", parts: [{ text: userText }] });
-            session.chatHistory.push({ role: "model", parts: [{ text: responseText }] });
-            return responseText;
+            session.chatHistory.push({ role: "model", parts: [{ text: text }] });
+            return text;
         } catch (error) {
-            console.error(`⚠️ Key ${i + 1} Failed: ${error.message}`);
+            console.error(`⚠️ Key ${i + 1} Error: ${error.message}`);
         }
     }
-    return "Sorry, I am having trouble connecting to the servers.";
+    return "I'm having a bit of a headache right now. Try again later.";
 }
 
 // ---------------------------------------------------------
-// 🎵 DOWNLOAD LOGIC (SoundCloud - Background)
+// 🎵 DOWNLOAD LOGIC (Optimization Fix)
 // ---------------------------------------------------------
 async function startDownload(callSid, query) {
-    console.log(`🎵 [Background] Downloading: "${query}"`);
-    downloadQueue.set(callSid, { status: 'pending' });
+    console.log(`🎵 [Queue] Request: "${query}"`);
+    downloadQueue.set(callSid, { status: 'pending', startTime: Date.now() });
 
     const uniqueId = uuidv4();
     const filename = `${uniqueId}.mp3`;
     const outputTemplate = path.join(DOWNLOAD_DIR, `${uniqueId}.%(ext)s`);
 
-    // Using SoundCloud (scsearch1) - Safest for Cloud Servers
-    const command = `yt-dlp "scsearch1:${query}" -x --audio-format mp3 --no-playlist --force-ipv4 -o "${outputTemplate}"`;
+    // 🛠 AUDIO FIX:
+    // scsearch1: SoundCloud is faster/safer than YouTube
+    // -ac 1: Convert to Mono (smaller file)
+    // -ar 16000: Convert to 16kHz (phone quality, downloads 4x faster)
+    const args = [
+        `scsearch1:${query}`,
+        '-x',
+        '--audio-format', 'mp3',
+        '--postprocessor-args', 'ffmpeg:-ac 1 -ar 16000', 
+        '--no-playlist',
+        '--force-ipv4',
+        '-o', outputTemplate
+    ];
 
-    exec(command, { timeout: 120000 }, (error, stdout, stderr) => {
-        if (error) {
-            console.error("🚨 Download Error:", stderr);
+    const child = spawn('yt-dlp', args);
+
+    child.on('close', (code) => {
+        if (code === 0) {
+            console.log(`✅ [Ready] ${query} -> ${filename}`);
+            downloadQueue.set(callSid, {
+                status: 'done',
+                url: `${BASE_URL}/music/${filename}`,
+                title: query,
+                filename: filename
+            });
+
+            // Cleanup after 10 mins
+            setTimeout(() => {
+                if (fs.existsSync(path.join(DOWNLOAD_DIR, filename))) fs.unlinkSync(path.join(DOWNLOAD_DIR, filename));
+            }, 600000);
+        } else {
+            console.error(`🚨 [Fail] Exit Code: ${code}`);
             downloadQueue.set(callSid, { status: 'error' });
-            return;
         }
-        
-        console.log("✅ Download Finished. File ready.");
-        downloadQueue.set(callSid, { 
-            status: 'done', 
-            url: `${BASE_URL}/music/${filename}`,
-            title: query
-        });
-
-        // Cleanup after 10 mins
-        setTimeout(() => {
-            if (fs.existsSync(path.join(DOWNLOAD_DIR, filename))) fs.unlinkSync(path.join(DOWNLOAD_DIR, filename));
-        }, 600000); 
     });
 }
 
 // ---------------------------------------------------------
-// 📞 ROUTE: START
+// 📞 ROUTE: INCOMING CALL
 // ---------------------------------------------------------
 app.post("/twiml", (req, res) => {
     const caller = req.body.From;
-    console.log(`📞 Call from: ${caller}`);
+    console.log(`📞 Incoming: ${caller}`);
 
     if (!VERIFIED_CALLERS.includes(caller)) {
-        console.log(`⛔ Blocked Caller: ${caller}`);
         const r = new VoiceResponse();
         r.reject();
         return res.type("text/xml").send(r.toString());
     }
 
     sessions.delete(req.body.CallSid);
-    getSession(req.body.CallSid); 
+    getSession(req.body.CallSid);
 
-    const response = new VoiceResponse();
-    response.say("Connected. Ask Gemini, or press Pound for music.");
-    response.gather({ input: "speech dtmf", numDigits: 1, finishOnKey: "", action: "/main-gather", method: "POST", timeout: 5, bargeIn: true });
-    res.type("text/xml").send(response.toString());
+    const r = new VoiceResponse();
+    r.say("System Online. Speak to Gemini, or press Pound for music.");
+    r.gather({ input: "speech dtmf", numDigits: 1, action: "/main-gather", method: "POST", timeout: 5, bargeIn: true });
+    res.type("text/xml").send(r.toString());
 });
 
 // ---------------------------------------------------------
-// 📞 ROUTE: MAIN GATHER
+// 📞 ROUTE: CONVERSATION HANDLER
 // ---------------------------------------------------------
 app.post("/main-gather", async (req, res) => {
-    const response = new VoiceResponse();
+    const r = new VoiceResponse();
     const callSid = req.body.CallSid;
     const digits = req.body.Digits;
     const userText = req.body.SpeechResult;
     const session = getSession(callSid);
 
-    if (digits === "0") { response.redirect("/twiml"); return res.type("text/xml").send(response.toString()); }
-    if (digits === "#") { response.redirect("/music-mode"); return res.type("text/xml").send(response.toString()); }
+    if (digits === "0") { r.redirect("/twiml"); return res.type("text/xml").send(r.toString()); }
+    if (digits === "#") { r.redirect("/music-mode"); return res.type("text/xml").send(r.toString()); }
 
     if (!userText) {
-        response.gather({ input: "speech dtmf", numDigits: 1, finishOnKey: "", action: "/main-gather" });
-        return res.type("text/xml").send(response.toString());
+        r.gather({ input: "speech dtmf", numDigits: 1, action: "/main-gather" });
+        return res.type("text/xml").send(r.toString());
     }
 
     const reply = await getGeminiResponse(session, userText);
-    response.say(reply);
-    response.gather({ input: "speech dtmf", numDigits: 1, finishOnKey: "", action: "/main-gather" });
-    res.type("text/xml").send(response.toString());
+    r.say(reply);
+    r.gather({ input: "speech dtmf", numDigits: 1, action: "/main-gather", timeout: 5 });
+    res.type("text/xml").send(r.toString());
 });
 
 // ---------------------------------------------------------
-// 🎵 ROUTE: MUSIC ENTRY
+// 🎵 ROUTE: MUSIC MENU
 // ---------------------------------------------------------
 app.post("/music-mode", (req, res) => {
-    const response = new VoiceResponse();
-    const gather = response.gather({ input: "speech dtmf", numDigits: 1, finishOnKey: "", action: "/music-process", timeout: 5, bargeIn: true });
-    gather.say("What song?"); 
-    res.type("text/xml").send(response.toString());
+    const r = new VoiceResponse();
+    const gather = r.gather({ input: "speech dtmf", numDigits: 1, action: "/music-logic", timeout: 5, bargeIn: true });
+    gather.say("Music Mode. Name a song.");
+    res.type("text/xml").send(r.toString());
 });
 
 // ---------------------------------------------------------
-// 🎵 ROUTE: MUSIC PROCESS
+// 🎵 ROUTE: MUSIC PROCESSOR
 // ---------------------------------------------------------
-app.post("/music-process", async (req, res) => {
-    const response = new VoiceResponse();
+app.post("/music-logic", async (req, res) => {
+    const r = new VoiceResponse();
     const callSid = req.body.CallSid;
     const digits = req.body.Digits;
     const userText = req.body.SpeechResult;
     const session = getSession(callSid);
 
-    if (digits === "0") { response.redirect("/twiml"); return res.type("text/xml").send(response.toString()); }
+    if (digits === "0") { r.redirect("/twiml"); return res.type("text/xml").send(r.toString()); }
 
-    // 🕹️ Controls
     if (["4", "5", "6"].includes(digits)) {
         if (session.musicHistory.length === 0) {
-            response.say("No history.");
-            response.redirect("/music-mode");
-            return res.type("text/xml").send(response.toString());
+            r.say("History empty.");
+            r.redirect("/music-mode");
+            return res.type("text/xml").send(r.toString());
         }
-        if (digits === "4" && session.index > 0) session.index--; 
-        if (digits === "6" && session.index < session.musicHistory.length - 1) session.index++; 
-
-        const song = session.musicHistory[session.index];
-        response.say(`Playing ${song.title}`);
-        const gather = response.gather({ input: "dtmf", numDigits: 1, finishOnKey: "", action: "/music-process" });
-        gather.play(song.url);
-        response.redirect("/music-mode"); 
-        return res.type("text/xml").send(response.toString());
-    }
-
-    // 🔍 New Search
-    if (userText) {
-        startDownload(callSid, userText); // Start in background
         
-        response.say("Searching...");
-        response.redirect("/music-check-status"); // Wait Loop
-        return res.type("text/xml").send(response.toString());
+        if (digits === "4" && session.index > 0) session.index--;
+        if (digits === "6" && session.index < session.musicHistory.length - 1) session.index++;
+        
+        const song = session.musicHistory[session.index];
+        r.say(`Playing ${song.title}`);
+        
+        const g = r.gather({ input: "dtmf", numDigits: 1, action: "/music-logic" });
+        g.play(song.url);
+        
+        r.redirect("/music-mode");
+        return res.type("text/xml").send(r.toString());
     }
 
-    response.say("Say a song name.");
-    response.redirect("/music-mode");
-    res.type("text/xml").send(response.toString());
+    if (userText) {
+        startDownload(callSid, userText);
+        r.say("Searching SoundCloud...");
+        r.redirect("/music-wait-loop"); 
+        return res.type("text/xml").send(r.toString());
+    }
+
+    r.say("I didn't catch that.");
+    r.redirect("/music-mode");
+    res.type("text/xml").send(r.toString());
 });
 
 // ---------------------------------------------------------
-// 🔄 ROUTE: WAIT LOOP (Prevents Timeout)
+// 🔄 ROUTE: THE POLLING LOOP
 // ---------------------------------------------------------
-app.post("/music-check-status", (req, res) => {
-    const response = new VoiceResponse();
+app.post("/music-wait-loop", (req, res) => {
+    const r = new VoiceResponse();
     const callSid = req.body.CallSid;
-    const download = downloadQueue.get(callSid);
+    const dl = downloadQueue.get(callSid);
 
-    if (!download) {
-        response.say("Error.");
-        response.redirect("/music-mode");
-        return res.type("text/xml").send(response.toString());
+    if (!dl) {
+        r.say("Session lost.");
+        r.redirect("/music-mode");
+        return res.type("text/xml").send(r.toString());
     }
 
-    if (download.status === 'pending') {
-        response.pause({ length: 3 }); // Wait 3 seconds
-        response.redirect("/music-check-status"); // Check again
-        return res.type("text/xml").send(response.toString());
-    }
-
-    if (download.status === 'error') {
-        response.say("Download failed.");
+    if (Date.now() - dl.startTime > 60000) {
+        r.say("Search timed out.");
         downloadQueue.delete(callSid);
-        response.redirect("/music-mode");
-        return res.type("text/xml").send(response.toString());
+        r.redirect("/music-mode");
+        return res.type("text/xml").send(r.toString());
     }
 
-    if (download.status === 'done') {
+    if (dl.status === 'pending') {
+        r.pause({ length: 2 });
+        r.redirect("/music-wait-loop");
+        return res.type("text/xml").send(r.toString());
+    }
+
+    if (dl.status === 'error') {
+        r.say("I couldn't download that song.");
+        downloadQueue.delete(callSid);
+        r.redirect("/music-mode");
+        return res.type("text/xml").send(r.toString());
+    }
+
+    if (dl.status === 'done') {
         const session = getSession(callSid);
-        session.musicHistory.push({ title: download.title, url: download.url });
+        session.musicHistory.push({ title: dl.title, url: dl.url });
         session.index = session.musicHistory.length - 1;
 
-        response.say(`Playing ${download.title}`);
-        const gather = response.gather({ input: "dtmf", numDigits: 1, finishOnKey: "", action: "/music-process" });
-        gather.play(download.url);
+        r.say(`Playing ${dl.title}`);
+        const g = r.gather({ input: "dtmf", numDigits: 1, action: "/music-logic" });
+        g.play(dl.url);
         
-        downloadQueue.delete(callSid);
-        response.redirect("/music-mode");
-        return res.type("text/xml").send(response.toString());
+        r.redirect("/music-mode");
+        return res.type("text/xml").send(r.toString());
     }
 });
 
