@@ -1,4 +1,4 @@
-console.log("🚀 Starting Server: Smart File Detection & Logs...");
+console.log("🚀 Starting Server: SAFE MODE (No Filters, Guaranteed Play)...");
 
 import express from "express";
 import dotenv from "dotenv";
@@ -16,6 +16,7 @@ dotenv.config();
 // ==============================================================================
 const CONFIG = {
     PORT: process.env.PORT || 3000,
+    // Your verified Render URL
     BASE_URL: process.env.RENDER_EXTERNAL_URL || "https://yt-dlp-gemini-ai-call.onrender.com", 
     DOWNLOAD_DIR: "/tmp",
     
@@ -43,7 +44,7 @@ const CONFIG = {
 };
 
 // ==============================================================================
-// 🛠️ LOGGING & SERVICES
+// 🛠️ SERVICES
 // ==============================================================================
 const logBuffer = [];
 const addToLog = (type, args) => {
@@ -87,83 +88,73 @@ async function askGemini(session, text) {
     return "Brain offline.";
 }
 
-// 2. MUSIC SERVICE (Smart Detection)
+// 2. MUSIC SERVICE (SAFE MODE - NO FILTERS)
 async function searchAndDownload(callSid, query) {
     console.log(`🎵 [Download Request] ${query}`);
     downloadQueue.set(callSid, { status: 'pending', startTime: Date.now() });
 
     const id = uuidv4();
-    // We don't force .mp3 in the check anymore, we look for what actually arrives
+    const filename = `${id}.mp3`;
     const outputTemplate = path.join(CONFIG.DOWNLOAD_DIR, `${id}.%(ext)s`);
 
+    // 🛡️ SAFE COMMAND: No filters. Just grab the first result.
     const args = [
-        `scsearch5:${query}`,
-        '--match-filter', 'duration > 60', // ⚠️ Matches > 60s only
-        '-I', '1',
+        `scsearch1:${query}`, // Simple Search
         '-x', '--audio-format', 'mp3',
-        '--postprocessor-args', 'ffmpeg:-ac 1 -ar 16000',
+        '--postprocessor-args', 'ffmpeg:-ac 1 -ar 16000', // Still keep it fast/mono
         '--no-playlist', '--force-ipv4', '-o', outputTemplate
     ];
 
     const child = spawn('yt-dlp', args);
 
-    // 🔍 X-RAY LOGS: See exactly what the downloader is saying
+    // X-Ray Logs included
     child.stdout.on('data', (data) => {
         const line = data.toString();
-        if (line.includes('[download]') || line.includes('Deleting')) console.log(`🔹 ${line.trim()}`);
+        if (line.includes('[download]')) console.log(`🔹 ${line.trim()}`);
     });
-    child.stderr.on('data', (data) => console.log(`🔸 ${data.toString().trim()}`));
 
     child.on('close', (code) => {
-        // 🛠️ SMART FINDER: Look for ANY file starting with this UUID
-        // This handles cases where conversion failed (left as .m4a) OR success (.mp3)
+        // Find ANY file that matches the ID (mp3, m4a, etc)
         const files = fs.readdirSync(CONFIG.DOWNLOAD_DIR);
         const foundFile = files.find(f => f.startsWith(id));
 
         if (foundFile) {
-            const fullPath = path.join(CONFIG.DOWNLOAD_DIR, foundFile);
-            const stats = fs.statSync(fullPath);
-            console.log(`✅ [File Found] ${foundFile} (${stats.size} bytes)`);
-
-            if (stats.size > 10000) {
-                downloadQueue.set(callSid, {
-                    status: 'done',
-                    url: `${CONFIG.BASE_URL}/music/${foundFile}`,
-                    title: query
-                });
-                setTimeout(() => { if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath); }, 600000);
-            } else {
-                console.error("⚠️ File too small (silence).");
-                downloadQueue.set(callSid, { status: 'error' });
-            }
+            console.log(`✅ [File Ready] ${foundFile}`);
+            downloadQueue.set(callSid, {
+                status: 'done',
+                url: `${CONFIG.BASE_URL}/music/${foundFile}`,
+                title: query
+            });
+            // Cleanup
+            setTimeout(() => { 
+                const p = path.join(CONFIG.DOWNLOAD_DIR, foundFile);
+                if (fs.existsSync(p)) fs.unlinkSync(p); 
+            }, 600000);
         } else {
-            // If we are here, the FILTER blocked everything.
-            console.error(`🚨 [No File] The filter likely rejected all 5 results for being too short.`);
+            console.error(`🚨 [Failed] Code: ${code}`);
             downloadQueue.set(callSid, { status: 'error' });
         }
     });
 }
 
 // ==============================================================================
-// 🚀 SERVER SETUP
+// 🚀 SERVER
 // ==============================================================================
 const app = express();
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 const VoiceResponse = twilio.twiml.VoiceResponse;
 
-// 📂 SERVE AUDIO FILES
+// Serve Audio
 app.get("/music/:filename", (req, res) => {
     const f = path.resolve(CONFIG.DOWNLOAD_DIR, req.params.filename);
-    if (!fs.existsSync(f)) {
-        console.error(`❌ [404] Twilio asked for ${req.params.filename} but it's gone.`);
-        return res.status(404).send("File missing");
-    }
+    if (!fs.existsSync(f)) return res.status(404).send("File missing");
     const stat = fs.statSync(f);
     res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Content-Length': stat.size });
     fs.createReadStream(f).pipe(res);
 });
 
+// Logs
 app.get("/logs", (req, res) => {
     if (req.query.pwd !== "1234") return res.status(403).send("No.");
     res.send(`<html><meta http-equiv="refresh" content="2"><body style="background:#111;color:#0f0;font-family:monospace"><pre>${logBuffer.join("\n")}</pre></body></html>`);
