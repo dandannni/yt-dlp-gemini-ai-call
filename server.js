@@ -1,4 +1,4 @@
-console.log("🚀 Starting Server: SAFE MODE (No Filters, Guaranteed Play)...");
+console.log("🚀 Starting Server: Smart Fallback Edition...");
 
 import express from "express";
 import dotenv from "dotenv";
@@ -16,7 +16,6 @@ dotenv.config();
 // ==============================================================================
 const CONFIG = {
     PORT: process.env.PORT || 3000,
-    // Your verified Render URL
     BASE_URL: process.env.RENDER_EXTERNAL_URL || "https://yt-dlp-gemini-ai-call.onrender.com", 
     DOWNLOAD_DIR: "/tmp",
     
@@ -44,7 +43,7 @@ const CONFIG = {
 };
 
 // ==============================================================================
-// 🛠️ SERVICES
+// 🛠️ LOGGING & SERVICES
 // ==============================================================================
 const logBuffer = [];
 const addToLog = (type, args) => {
@@ -88,51 +87,70 @@ async function askGemini(session, text) {
     return "Brain offline.";
 }
 
-// 2. MUSIC SERVICE (SAFE MODE - NO FILTERS)
-async function searchAndDownload(callSid, query) {
-    console.log(`🎵 [Download Request] ${query}`);
-    downloadQueue.set(callSid, { status: 'pending', startTime: Date.now() });
+// 2. MUSIC SERVICE (SMART FALLBACK SYSTEM)
+async function searchAndDownload(callSid, query, attempt = 1) {
+    console.log(`🎵 [Download Request] "${query}" (Attempt ${attempt})`);
+    
+    // Only reset queue on first attempt
+    if (attempt === 1) downloadQueue.set(callSid, { status: 'pending', startTime: Date.now() });
 
     const id = uuidv4();
-    const filename = `${id}.mp3`;
     const outputTemplate = path.join(CONFIG.DOWNLOAD_DIR, `${id}.%(ext)s`);
+    let args = [];
 
-    // 🛡️ SAFE COMMAND: No filters. Just grab the first result.
-    const args = [
-        `scsearch1:${query}`, // Simple Search
-        '-x', '--audio-format', 'mp3',
-        '--postprocessor-args', 'ffmpeg:-ac 1 -ar 16000', // Still keep it fast/mono
-        '--no-playlist', '--force-ipv4', '-o', outputTemplate
-    ];
+    if (attempt === 1) {
+        // 🥇 ATTEMPT 1: DEEP SEARCH (Look for full song)
+        // Scans top 10, strictly rejects short previews.
+        args = [
+            `scsearch10:${query}`,
+            '--match-filter', 'duration > 60',
+            '-I', '1', 
+            '-x', '--audio-format', 'mp3',
+            '--postprocessor-args', 'ffmpeg:-ac 1 -ar 16000',
+            '--no-playlist', '--force-ipv4', '-o', outputTemplate
+        ];
+    } else {
+        // 🥈 ATTEMPT 2: FALLBACK (Grab anything)
+        // No filters. Just grab the first result (even if it's 30s).
+        console.log("⚠️ [Fallback Mode] Filter too strict. Grabbing first result (Preview/Short).");
+        args = [
+            `scsearch1:${query}`,
+            '-x', '--audio-format', 'mp3',
+            '--postprocessor-args', 'ffmpeg:-ac 1 -ar 16000',
+            '--no-playlist', '--force-ipv4', '-o', outputTemplate
+        ];
+    }
 
     const child = spawn('yt-dlp', args);
 
-    // X-Ray Logs included
-    child.stdout.on('data', (data) => {
-        const line = data.toString();
-        if (line.includes('[download]')) console.log(`🔹 ${line.trim()}`);
-    });
-
     child.on('close', (code) => {
-        // Find ANY file that matches the ID (mp3, m4a, etc)
+        // Check if ANY file was created with this ID
         const files = fs.readdirSync(CONFIG.DOWNLOAD_DIR);
         const foundFile = files.find(f => f.startsWith(id));
 
         if (foundFile) {
-            console.log(`✅ [File Ready] ${foundFile}`);
+            // SUCCESS!
+            const fullPath = path.join(CONFIG.DOWNLOAD_DIR, foundFile);
+            const stats = fs.statSync(fullPath);
+            console.log(`✅ [File Ready] ${foundFile} (${stats.size} bytes)`);
+
             downloadQueue.set(callSid, {
                 status: 'done',
                 url: `${CONFIG.BASE_URL}/music/${foundFile}`,
                 title: query
             });
-            // Cleanup
-            setTimeout(() => { 
-                const p = path.join(CONFIG.DOWNLOAD_DIR, foundFile);
-                if (fs.existsSync(p)) fs.unlinkSync(p); 
-            }, 600000);
+
+            setTimeout(() => { if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath); }, 600000);
         } else {
-            console.error(`🚨 [Failed] Code: ${code}`);
-            downloadQueue.set(callSid, { status: 'error' });
+            // FAILURE
+            if (attempt === 1) {
+                // If Attempt 1 failed, Trigger Attempt 2
+                searchAndDownload(callSid, query, 2);
+            } else {
+                // If Attempt 2 failed, give up.
+                console.error(`🚨 [Failed] Even fallback failed.`);
+                downloadQueue.set(callSid, { status: 'error' });
+            }
         }
     });
 }
@@ -245,7 +263,7 @@ app.all("/music-wait-loop", (req, res) => {
         const g = r.gather({ input: "dtmf", numDigits: 1, finishOnKey: "", action: "/music-logic" });
         g.play(dl.url);
         r.redirect("/music-mode");
-    } else if (dl.status === 'error' || Date.now() - dl.startTime > 60000) {
+    } else if (dl.status === 'error' || Date.now() - dl.startTime > 90000) { // Increased timeout for retry
         r.say("Download failed.");
         downloadQueue.delete(req.body.CallSid);
         r.redirect("/music-mode");
