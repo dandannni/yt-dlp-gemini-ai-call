@@ -1,17 +1,20 @@
 {
-  "name": "gemini-phone-call",
-  "version": "1.0.0",
-  "description": "AI Phone Bot",
-  "type": "module",
+  "name": "gemini-music-bot",
+  "version": "2.0.0",
+  "description": "Twilio Bot with Resume Functionality",
   "main": "server.js",
+  "type": "module",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
-    "@google/generative-ai": "^0.12.0",
-    "dotenv": "^16.3.1",
     "express": "^4.18.2",
-    "twilio": "^4.18.0",
+    "twilio": "^4.19.0",
+    "dotenv": "^16.3.1",
+    "@google/generative-ai": "^0.12.0",
     "uuid": "^9.0.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
