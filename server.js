@@ -1,4 +1,4 @@
-console.log("🚀 Starting Server: RESUME & LONG PAUSE EDITION...");
+console.log("🚀 Starting Server: HASH KEY FIXED + MASTER BUILD...");
 
 import express from "express";
 import dotenv from "dotenv";
@@ -36,18 +36,19 @@ const CONFIG = {
     ].filter(key => key),
 
     MESSAGES: {
-        WELCOME: "Hello! Gemini Online. 1 to Chat. 2 to Type. Hash for Music.",
+        WELCOME: "Hello! Gemini AI is online. Press 1 to chat, 2 to type, or Hash for music.",
         MUSIC_MENU: "Music Mode. 1 to Search. 2 for Liked Songs. Controls: 5 Pause, Star for Options.",
-        PAUSED: "Paused. Call will stay open. Press 5 to resume.",
+        PAUSED: "Paused. Press 5 to resume.",
         RESUMING: "Resuming...",
         SAVED: "Saved.",
         REMOVED: "Removed.",
-        EMPTY: "Empty."
+        EMPTY: "No liked songs yet.",
+        T9_MODE: "Start typing. 1 separates letters. 0 is space. Star to send."
     }
 };
 
 // ==============================================================================
-// 💾 DATABASE & T9 UTILS
+// 💾 DATABASE & UTILS
 // ==============================================================================
 function getLikedSongs() {
     if (!fs.existsSync(CONFIG.DATA_FILE)) return [];
@@ -82,7 +83,7 @@ function parseT9(digits, lang = 'en') {
 }
 
 // ==============================================================================
-// 🛠️ SESSION & FFMEG UTILS
+// 🛠️ SESSION & FFMPEG UTILS
 // ==============================================================================
 const sessions = new Map();
 const downloadQueue = new Map();
@@ -92,9 +93,9 @@ const getSession = (callSid) => {
         sessions.set(callSid, { 
             chatHistory: [], 
             t9Buffer: "",
-            currentSong: null, // { title, filename, duration }
-            playStartTime: 0, // Timestamp when song started
-            pausedAt: 0,      // Seconds into song
+            currentSong: null, 
+            playStartTime: 0, 
+            pausedAt: 0,      
             mode: "normal",
             likedIndex: 0
         });
@@ -102,19 +103,13 @@ const getSession = (callSid) => {
     return sessions.get(callSid);
 };
 
-// CUT THE MP3 TO RESUME
 async function sliceMp3(originalFilename, startSeconds) {
     return new Promise((resolve) => {
         const inputPath = path.join(CONFIG.DOWNLOAD_DIR, originalFilename);
         const newFilename = `resume_${Math.floor(startSeconds)}_${originalFilename}`;
         const outputPath = path.join(CONFIG.DOWNLOAD_DIR, newFilename);
-
-        // FFmpeg command to cut file: -ss (start time) -i (input) -c copy (fast copy)
         const args = ['-ss', String(startSeconds), '-i', inputPath, '-c', 'copy', '-y', outputPath];
-        
-        console.log(`✂️ Slicing MP3 at ${startSeconds}s`);
         const child = spawn('ffmpeg', args);
-        
         child.on('close', (code) => {
             if (code === 0 && fs.existsSync(outputPath)) resolve(newFilename);
             else resolve(null);
@@ -140,32 +135,21 @@ async function askGemini(session, text) {
 }
 
 async function searchAndDownload(callSid, query, attempt = 1) {
-    console.log(`🎵 Searching (${attempt}): ${query}`);
     if (attempt === 1) downloadQueue.set(callSid, { status: 'pending', startTime: Date.now() });
-    
     const id = uuidv4();
     const outputTemplate = path.join(CONFIG.DOWNLOAD_DIR, `${id}.%(ext)s`);
     let args = [];
-
-    // Deep Search vs Fallback logic
     if (attempt === 1) {
         args = [`scsearch10:${query}`, '--match-filter', 'duration > 60', '-I', '1', '-x', '--audio-format', 'mp3', '--postprocessor-args', 'ffmpeg:-ac 1 -ar 16000', '--no-playlist', '--force-ipv4', '-o', outputTemplate];
     } else {
         args = [`scsearch1:${query}`, '-x', '--audio-format', 'mp3', '--postprocessor-args', 'ffmpeg:-ac 1 -ar 16000', '--no-playlist', '--force-ipv4', '-o', outputTemplate];
     }
-
     const child = spawn('yt-dlp', args);
     child.on('close', (code) => {
         const files = fs.readdirSync(CONFIG.DOWNLOAD_DIR);
         const found = files.find(f => f.startsWith(id));
         if (found) {
-            console.log(`✅ Ready: ${found}`);
-            downloadQueue.set(callSid, { 
-                status: 'done', 
-                url: `${CONFIG.BASE_URL}/music/${found}`, 
-                title: query,
-                filename: found // Store filename for slicing later
-            });
+            downloadQueue.set(callSid, { status: 'done', url: `${CONFIG.BASE_URL}/music/${found}`, title: query, filename: found });
             setTimeout(() => { if (fs.existsSync(path.join(CONFIG.DOWNLOAD_DIR, found))) fs.unlinkSync(path.join(CONFIG.DOWNLOAD_DIR, found)); }, 1200000);
         } else {
             if (attempt === 1) searchAndDownload(callSid, query, 2);
@@ -175,7 +159,7 @@ async function searchAndDownload(callSid, query, attempt = 1) {
 }
 
 // ==============================================================================
-// 🚀 ROUTING & TWILIO
+// 🚀 ROUTING
 // ==============================================================================
 const app = express();
 app.use(express.urlencoded({ extended: false }));
@@ -190,15 +174,25 @@ app.get("/music/:filename", (req, res) => {
     } else res.status(404).send("Gone");
 });
 
-// 1. MAIN MENU
+// 1. MAIN MENU (HASH FIX APPLIED)
 app.all("/twiml", (req, res) => {
     const caller = req.body.From;
     if (!CONFIG.VERIFIED_CALLERS.includes(caller)) { const r = new VoiceResponse(); r.reject(); return res.type("text/xml").send(r.toString()); }
     
     sessions.delete(req.body.CallSid);
     const r = new VoiceResponse();
-    const g = r.gather({ input: "dtmf", numDigits: 1, action: "/router", timeout: 10, bargeIn: true });
+    
+    // 🛠️ FIX: finishOnKey="" tells Twilio to NOT treat '#' as 'Enter'.
+    const g = r.gather({ 
+        input: "dtmf", 
+        numDigits: 1, 
+        action: "/router", 
+        timeout: 10, 
+        bargeIn: true,
+        finishOnKey: "" // <--- THIS SAVES THE # KEY
+    });
     g.say(CONFIG.MESSAGES.WELCOME);
+    
     r.redirect("/twiml");
     res.type("text/xml").send(r.toString());
 });
@@ -206,6 +200,10 @@ app.all("/twiml", (req, res) => {
 app.all("/router", (req, res) => {
     const r = new VoiceResponse();
     const d = req.body.Digits;
+    
+    // 🔍 Debugging log to confirm '#' is received
+    console.log(`[Router] Digit received: ${d}`);
+
     if (d === "1") r.redirect("/voice-mode");      
     else if (d === "2") r.redirect("/t9-mode");    
     else if (d === "#") r.redirect("/music-mode"); 
@@ -213,12 +211,12 @@ app.all("/router", (req, res) => {
     res.type("text/xml").send(r.toString());
 });
 
-// 2. VOICE/T9 (Standard)
+// 2. VOICE & T9
 app.all("/voice-mode", (req, res) => {
     const r = new VoiceResponse();
     r.play({ digits: "w" }); 
     r.gather({ input: "speech", action: "/voice-process", timeout: 4 });
-    const g = r.gather({ input: "dtmf", numDigits: 1, action: "/router" });
+    const g = r.gather({ input: "dtmf", numDigits: 1, action: "/router", finishOnKey: "" });
     g.say("1 to speak. 0 menu.");
     res.type("text/xml").send(r.toString());
 });
@@ -229,7 +227,7 @@ app.all("/voice-process", async (req, res) => {
     if (text) {
         const reply = await askGemini(getSession(req.body.CallSid), text);
         r.say(reply);
-        const g = r.gather({ input: "dtmf", numDigits: 1, action: "/router" });
+        const g = r.gather({ input: "dtmf", numDigits: 1, action: "/router", finishOnKey: "" });
         g.say("1 reply. 2 type. Hash music.");
     } else r.redirect("/voice-mode");
     res.type("text/xml").send(r.toString());
@@ -253,7 +251,7 @@ app.all("/t9-process", async (req, res) => {
         const reply = await askGemini(session, text);
         session.t9Buffer = ""; 
         r.say(reply);
-        const g = r.gather({ input: "dtmf", numDigits: 1, action: "/router" });
+        const g = r.gather({ input: "dtmf", numDigits: 1, action: "/router", finishOnKey: "" });
         g.say("1 speak. 2 type.");
     } else r.redirect("/t9-mode");
     res.type("text/xml").send(r.toString());
@@ -262,7 +260,8 @@ app.all("/t9-process", async (req, res) => {
 // 3. MUSIC MODE
 app.all("/music-mode", (req, res) => {
     const r = new VoiceResponse();
-    const g = r.gather({ input: "dtmf", numDigits: 1, action: "/music-logic", timeout: 10, bargeIn: true });
+    // Also adding finishOnKey="" here just in case you use # for something else later
+    const g = r.gather({ input: "dtmf", numDigits: 1, action: "/music-logic", timeout: 10, bargeIn: true, finishOnKey: "" });
     g.say(CONFIG.MESSAGES.MUSIC_MENU);
     res.type("text/xml").send(r.toString());
 });
@@ -280,7 +279,6 @@ app.all("/music-logic", (req, res) => {
         r.gather({ input: "speech", action: "/music-search", timeout: 4 });
         return res.type("text/xml").send(r.toString());
     }
-
     if (d === "2") {
         session.mode = "liked";
         const likes = getLikedSongs();
@@ -308,7 +306,7 @@ app.all("/music-search", (req, res) => {
     res.type("text/xml").send(r.toString());
 });
 
-// 4. MUSIC PLAYER & RESUME LOGIC
+// 4. PLAYER & PAUSE/RESUME
 app.all("/music-wait-loop", (req, res) => {
     const r = new VoiceResponse();
     const dl = downloadQueue.get(req.body.CallSid);
@@ -317,13 +315,11 @@ app.all("/music-wait-loop", (req, res) => {
 
     if (dl.status === 'done') {
         const session = getSession(req.body.CallSid);
-        
-        // SAVE FOR RESUME
         session.currentSong = { title: dl.title, url: dl.url, filename: dl.filename };
-        session.playStartTime = Date.now(); // ⏱️ Start Timer
+        session.playStartTime = Date.now(); 
         
         r.say(`Playing ${dl.title}`);
-        const g = r.gather({ input: "dtmf", numDigits: 1, action: "/music-controls", bargeIn: true });
+        const g = r.gather({ input: "dtmf", numDigits: 1, action: "/music-controls", bargeIn: true, finishOnKey: "" });
         g.play(dl.url);
         
         if (session.mode === "liked") r.redirect("/music-next-liked");
@@ -345,28 +341,23 @@ app.all("/music-controls", (req, res) => {
     const d = req.body.Digits;
     const session = getSession(req.body.CallSid);
 
-    // ⏸️ PAUSE LOGIC
     if (d === "5") {
-        // Calculate how long we played
         const now = Date.now();
         const playedMs = now - session.playStartTime;
-        // If we are already resumed, add previous offset
         const totalPlayedSecs = (playedMs / 1000) + (session.pausedAt || 0);
-        
-        session.pausedAt = totalPlayedSecs; // Save precise stop time
+        session.pausedAt = totalPlayedSecs; 
         
         r.say(CONFIG.MESSAGES.PAUSED);
-        r.redirect("/music-pause-loop"); // Go to long loop
+        r.redirect("/music-pause-loop"); 
         return res.type("text/xml").send(r.toString());
     }
 
     if (d === "*") {
-        const g = r.gather({ input: "dtmf", numDigits: 1, action: "/music-options" });
+        const g = r.gather({ input: "dtmf", numDigits: 1, action: "/music-options", finishOnKey: "" });
         g.say("4 Like. 6 Remove.");
         return res.type("text/xml").send(r.toString());
     }
 
-    // Next/Prev Logic...
     if (session.mode === "liked") {
         if (d === "6") { r.redirect("/music-next-liked"); return res.type("text/xml").send(r.toString()); }
         if (d === "4") { session.likedIndex = Math.max(0, session.likedIndex - 1); r.redirect("/music-play-liked"); return res.type("text/xml").send(r.toString()); }
@@ -375,20 +366,14 @@ app.all("/music-controls", (req, res) => {
     res.type("text/xml").send(r.toString());
 });
 
-// ⏸️ PAUSE LOOP (Keeps call alive)
 app.all("/music-pause-loop", (req, res) => {
     const r = new VoiceResponse();
-    // Wait for 5 to Resume
-    const g = r.gather({ input: "dtmf", numDigits: 1, action: "/music-resume", timeout: 20 });
-    // Play silence to keep line open
+    const g = r.gather({ input: "dtmf", numDigits: 1, action: "/music-resume", timeout: 20, finishOnKey: "" });
     g.pause({ length: 20 });
-    
-    // Recursive loop to keep connection for minutes
     r.redirect("/music-pause-loop");
     res.type("text/xml").send(r.toString());
 });
 
-// ▶️ RESUME LOGIC (The FFmpeg Trick)
 app.all("/music-resume", async (req, res) => {
     const r = new VoiceResponse();
     const d = req.body.Digits;
@@ -396,25 +381,19 @@ app.all("/music-resume", async (req, res) => {
     
     if (d === "5" && session.currentSong) {
         r.say(CONFIG.MESSAGES.RESUMING);
-        
-        // Slice the MP3
         const newFilename = await sliceMp3(session.currentSong.filename, session.pausedAt);
-        
         if (newFilename) {
             const newUrl = `${CONFIG.BASE_URL}/music/${newFilename}`;
-            session.playStartTime = Date.now(); // Reset timer for new segment
-            
-            const g = r.gather({ input: "dtmf", numDigits: 1, action: "/music-controls", bargeIn: true });
+            session.playStartTime = Date.now(); 
+            const g = r.gather({ input: "dtmf", numDigits: 1, action: "/music-controls", bargeIn: true, finishOnKey: "" });
             g.play(newUrl);
-            
             if (session.mode === "liked") r.redirect("/music-next-liked");
             else r.redirect("/music-mode");
         } else {
-            r.say("Error resuming. Restarting.");
-            r.redirect("/music-mode"); // Fallback
+            r.say("Error.");
+            r.redirect("/music-mode");
         }
     } else {
-        // Keeps pausing if wrong key
         r.redirect("/music-pause-loop");
     }
     res.type("text/xml").send(r.toString());
@@ -432,8 +411,7 @@ app.all("/music-options", (req, res) => {
         removeLikedSong(session.currentSong.title);
         r.say(CONFIG.MESSAGES.REMOVED);
     }
-    // Return to pause menu so user can resume
-    r.redirect("/music-pause-loop");
+    r.redirect("/music-resume?Digits=5");
     res.type("text/xml").send(r.toString());
 });
 
@@ -452,7 +430,6 @@ app.all("/music-play-liked", (req, res) => {
     const session = getSession(req.body.CallSid);
     const likes = getLikedSongs();
     if (likes.length === 0) { r.redirect("/music-mode"); return res.type("text/xml").send(r.toString()); }
-    
     searchAndDownload(req.body.CallSid, likes[session.likedIndex]);
     r.say(`Loading ${likes[session.likedIndex]}`);
     r.redirect("/music-wait-loop");
