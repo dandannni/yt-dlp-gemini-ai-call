@@ -1,4 +1,4 @@
-console.log("🚀 Starting Server: Smart Fallback Edition...");
+console.log("🚀 Starting Server: RESUME & LONG PAUSE EDITION...");
 
 import express from "express";
 import dotenv from "dotenv";
@@ -18,6 +18,7 @@ const CONFIG = {
     PORT: process.env.PORT || 3000,
     BASE_URL: process.env.RENDER_EXTERNAL_URL || "https://yt-dlp-gemini-ai-call.onrender.com", 
     DOWNLOAD_DIR: "/tmp",
+    DATA_FILE: "/tmp/liked_songs.json",
     
     VERIFIED_CALLERS: [
         "+972548498889", 
@@ -35,242 +36,426 @@ const CONFIG = {
     ].filter(key => key),
 
     MESSAGES: {
-        WELCOME: "Hello! Speak to Gemini, or press Hash for music.",
-        MUSIC_WELCOME: "Music Mode. Name a song.",
-        SEARCHING: "Searching SoundCloud...",
-        NO_HISTORY: "No history yet.",
+        WELCOME: "Hello! Gemini Online. 1 to Chat. 2 to Type. Hash for Music.",
+        MUSIC_MENU: "Music Mode. 1 to Search. 2 for Liked Songs. Controls: 5 Pause, Star for Options.",
+        PAUSED: "Paused. Call will stay open. Press 5 to resume.",
+        RESUMING: "Resuming...",
+        SAVED: "Saved.",
+        REMOVED: "Removed.",
+        EMPTY: "Empty."
     }
 };
 
 // ==============================================================================
-// 🛠️ LOGGING & SERVICES
+// 💾 DATABASE & T9 UTILS
 // ==============================================================================
-const logBuffer = [];
-const addToLog = (type, args) => {
-    try {
-        const msg = args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ');
-        const time = new Date().toLocaleTimeString('en-US', { hour12: false });
-        const line = `[${time}] [${type}] ${msg.replace(/\r/g, '')}`;
-        logBuffer.push(line);
-        if (logBuffer.length > 200) logBuffer.shift();
-        process.stdout.write(line + '\n');
-    } catch (e) {}
-};
-console.log = (...args) => addToLog("INFO", args);
-console.error = (...args) => addToLog("ERROR", args);
+function getLikedSongs() {
+    if (!fs.existsSync(CONFIG.DATA_FILE)) return [];
+    try { return JSON.parse(fs.readFileSync(CONFIG.DATA_FILE)); } catch { return []; }
+}
+function saveLikedSong(title) {
+    const list = getLikedSongs();
+    if (!list.includes(title)) { list.push(title); fs.writeFileSync(CONFIG.DATA_FILE, JSON.stringify(list)); }
+}
+function removeLikedSong(title) {
+    let list = getLikedSongs();
+    list = list.filter(t => t !== title);
+    fs.writeFileSync(CONFIG.DATA_FILE, JSON.stringify(list));
+}
 
+const KEYMAPS = { en: { '2': 'abc', '3': 'def', '4': 'ghi', '5': 'jkl', '6': 'mno', '7': 'pqrs', '8': 'tuv', '9': 'wxyz', '0': ' ' } };
+function parseT9(digits, lang = 'en') {
+    let result = "", currentGroup = "", lastKey = "";
+    const map = KEYMAPS[lang];
+    const decode = (grp, key) => {
+        if (key === '0') return " ";
+        if (!map[key]) return "";
+        return map[key][(grp.length - 1) % map[key].length];
+    };
+    for (const char of digits) {
+        if (char === '1') { if (currentGroup) result += decode(currentGroup, lastKey); currentGroup = ""; lastKey = ""; continue; }
+        if (char !== lastKey) { if (currentGroup) result += decode(currentGroup, lastKey); currentGroup = char; lastKey = char; } 
+        else { currentGroup += char; }
+    }
+    if (currentGroup) result += decode(currentGroup, lastKey);
+    return result;
+}
+
+// ==============================================================================
+// 🛠️ SESSION & FFMEG UTILS
+// ==============================================================================
 const sessions = new Map();
 const downloadQueue = new Map();
+
 const getSession = (callSid) => {
-    if (!sessions.has(callSid)) sessions.set(callSid, { chatHistory: [], musicHistory: [], index: -1 });
+    if (!sessions.has(callSid)) {
+        sessions.set(callSid, { 
+            chatHistory: [], 
+            t9Buffer: "",
+            currentSong: null, // { title, filename, duration }
+            playStartTime: 0, // Timestamp when song started
+            pausedAt: 0,      // Seconds into song
+            mode: "normal",
+            likedIndex: 0
+        });
+    }
     return sessions.get(callSid);
 };
 
-// 1. AI SERVICE
+// CUT THE MP3 TO RESUME
+async function sliceMp3(originalFilename, startSeconds) {
+    return new Promise((resolve) => {
+        const inputPath = path.join(CONFIG.DOWNLOAD_DIR, originalFilename);
+        const newFilename = `resume_${Math.floor(startSeconds)}_${originalFilename}`;
+        const outputPath = path.join(CONFIG.DOWNLOAD_DIR, newFilename);
+
+        // FFmpeg command to cut file: -ss (start time) -i (input) -c copy (fast copy)
+        const args = ['-ss', String(startSeconds), '-i', inputPath, '-c', 'copy', '-y', outputPath];
+        
+        console.log(`✂️ Slicing MP3 at ${startSeconds}s`);
+        const child = spawn('ffmpeg', args);
+        
+        child.on('close', (code) => {
+            if (code === 0 && fs.existsSync(outputPath)) resolve(newFilename);
+            else resolve(null);
+        });
+    });
+}
+
+// ==============================================================================
+// 🤖 CORE SERVICES
+// ==============================================================================
 async function askGemini(session, text) {
-    if (CONFIG.GEMINI_KEYS.length === 0) return "No API Keys.";
+    if (CONFIG.GEMINI_KEYS.length === 0) return "No Keys.";
     for (const key of CONFIG.GEMINI_KEYS) {
         try {
             const genAI = new GoogleGenerativeAI(key);
-            const model = genAI.getGenerativeModel({
-                model: "gemini-2.5-flash",
-                systemInstruction: "You are a phone assistant. Keep answers short. If asked for music, say 'Press hash'.",
-            });
+            const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash", systemInstruction: "Keep answers short." });
             const chat = model.startChat({ history: session.chatHistory });
             const result = await chat.sendMessage(text);
-            const response = result.response.text();
-            session.chatHistory.push({ role: "user", parts: [{ text }] });
-            session.chatHistory.push({ role: "model", parts: [{ text: response }] });
-            return response;
+            return result.response.text();
         } catch (e) {}
     }
-    return "Brain offline.";
+    return "Error.";
 }
 
-// 2. MUSIC SERVICE (SMART FALLBACK SYSTEM)
 async function searchAndDownload(callSid, query, attempt = 1) {
-    console.log(`🎵 [Download Request] "${query}" (Attempt ${attempt})`);
-    
-    // Only reset queue on first attempt
+    console.log(`🎵 Searching (${attempt}): ${query}`);
     if (attempt === 1) downloadQueue.set(callSid, { status: 'pending', startTime: Date.now() });
-
+    
     const id = uuidv4();
     const outputTemplate = path.join(CONFIG.DOWNLOAD_DIR, `${id}.%(ext)s`);
     let args = [];
 
+    // Deep Search vs Fallback logic
     if (attempt === 1) {
-        // 🥇 ATTEMPT 1: DEEP SEARCH (Look for full song)
-        // Scans top 10, strictly rejects short previews.
-        args = [
-            `scsearch10:${query}`,
-            '--match-filter', 'duration > 60',
-            '-I', '1', 
-            '-x', '--audio-format', 'mp3',
-            '--postprocessor-args', 'ffmpeg:-ac 1 -ar 16000',
-            '--no-playlist', '--force-ipv4', '-o', outputTemplate
-        ];
+        args = [`scsearch10:${query}`, '--match-filter', 'duration > 60', '-I', '1', '-x', '--audio-format', 'mp3', '--postprocessor-args', 'ffmpeg:-ac 1 -ar 16000', '--no-playlist', '--force-ipv4', '-o', outputTemplate];
     } else {
-        // 🥈 ATTEMPT 2: FALLBACK (Grab anything)
-        // No filters. Just grab the first result (even if it's 30s).
-        console.log("⚠️ [Fallback Mode] Filter too strict. Grabbing first result (Preview/Short).");
-        args = [
-            `scsearch1:${query}`,
-            '-x', '--audio-format', 'mp3',
-            '--postprocessor-args', 'ffmpeg:-ac 1 -ar 16000',
-            '--no-playlist', '--force-ipv4', '-o', outputTemplate
-        ];
+        args = [`scsearch1:${query}`, '-x', '--audio-format', 'mp3', '--postprocessor-args', 'ffmpeg:-ac 1 -ar 16000', '--no-playlist', '--force-ipv4', '-o', outputTemplate];
     }
 
     const child = spawn('yt-dlp', args);
-
     child.on('close', (code) => {
-        // Check if ANY file was created with this ID
         const files = fs.readdirSync(CONFIG.DOWNLOAD_DIR);
-        const foundFile = files.find(f => f.startsWith(id));
-
-        if (foundFile) {
-            // SUCCESS!
-            const fullPath = path.join(CONFIG.DOWNLOAD_DIR, foundFile);
-            const stats = fs.statSync(fullPath);
-            console.log(`✅ [File Ready] ${foundFile} (${stats.size} bytes)`);
-
-            downloadQueue.set(callSid, {
-                status: 'done',
-                url: `${CONFIG.BASE_URL}/music/${foundFile}`,
-                title: query
+        const found = files.find(f => f.startsWith(id));
+        if (found) {
+            console.log(`✅ Ready: ${found}`);
+            downloadQueue.set(callSid, { 
+                status: 'done', 
+                url: `${CONFIG.BASE_URL}/music/${found}`, 
+                title: query,
+                filename: found // Store filename for slicing later
             });
-
-            setTimeout(() => { if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath); }, 600000);
+            setTimeout(() => { if (fs.existsSync(path.join(CONFIG.DOWNLOAD_DIR, found))) fs.unlinkSync(path.join(CONFIG.DOWNLOAD_DIR, found)); }, 1200000);
         } else {
-            // FAILURE
-            if (attempt === 1) {
-                // If Attempt 1 failed, Trigger Attempt 2
-                searchAndDownload(callSid, query, 2);
-            } else {
-                // If Attempt 2 failed, give up.
-                console.error(`🚨 [Failed] Even fallback failed.`);
-                downloadQueue.set(callSid, { status: 'error' });
-            }
+            if (attempt === 1) searchAndDownload(callSid, query, 2);
+            else downloadQueue.set(callSid, { status: 'error' });
         }
     });
 }
 
 // ==============================================================================
-// 🚀 SERVER
+// 🚀 ROUTING & TWILIO
 // ==============================================================================
 const app = express();
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 const VoiceResponse = twilio.twiml.VoiceResponse;
 
-// Serve Audio
 app.get("/music/:filename", (req, res) => {
     const f = path.resolve(CONFIG.DOWNLOAD_DIR, req.params.filename);
-    if (!fs.existsSync(f)) return res.status(404).send("File missing");
-    const stat = fs.statSync(f);
-    res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Content-Length': stat.size });
-    fs.createReadStream(f).pipe(res);
+    if (fs.existsSync(f)) {
+        res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Content-Length': fs.statSync(f).size });
+        fs.createReadStream(f).pipe(res);
+    } else res.status(404).send("Gone");
 });
 
-// Logs
-app.get("/logs", (req, res) => {
-    if (req.query.pwd !== "1234") return res.status(403).send("No.");
-    res.send(`<html><meta http-equiv="refresh" content="2"><body style="background:#111;color:#0f0;font-family:monospace"><pre>${logBuffer.join("\n")}</pre></body></html>`);
-});
-
-// ==============================================================================
-// 📞 ROUTES
-// ==============================================================================
+// 1. MAIN MENU
 app.all("/twiml", (req, res) => {
-    try {
-        const caller = req.body.From;
-        console.log(`📞 [New Call] ${caller}`);
-        if (!CONFIG.VERIFIED_CALLERS.includes(caller)) { const r = new VoiceResponse(); r.reject(); return res.type("text/xml").send(r.toString()); }
-
-        sessions.delete(req.body.CallSid);
-        const r = new VoiceResponse();
-        r.say(CONFIG.MESSAGES.WELCOME);
-        r.gather({ input: "speech dtmf", numDigits: 1, finishOnKey: "", action: "/main-gather", method: "POST", timeout: 5, bargeIn: true });
-        res.type("text/xml").send(r.toString());
-    } catch (e) { console.error(e); res.status(500).send("Err"); }
+    const caller = req.body.From;
+    if (!CONFIG.VERIFIED_CALLERS.includes(caller)) { const r = new VoiceResponse(); r.reject(); return res.type("text/xml").send(r.toString()); }
+    
+    sessions.delete(req.body.CallSid);
+    const r = new VoiceResponse();
+    const g = r.gather({ input: "dtmf", numDigits: 1, action: "/router", timeout: 10, bargeIn: true });
+    g.say(CONFIG.MESSAGES.WELCOME);
+    r.redirect("/twiml");
+    res.type("text/xml").send(r.toString());
 });
 
-app.all("/main-gather", async (req, res) => {
-    try {
-        const r = new VoiceResponse();
-        const { CallSid, Digits, SpeechResult } = req.body;
-        
-        if (Digits === "#") { r.redirect("/music-mode"); return res.type("text/xml").send(r.toString()); }
-        if (!SpeechResult && !Digits) { r.gather({ input: "speech dtmf", numDigits: 1, finishOnKey: "", action: "/main-gather" }); return res.type("text/xml").send(r.toString()); }
+app.all("/router", (req, res) => {
+    const r = new VoiceResponse();
+    const d = req.body.Digits;
+    if (d === "1") r.redirect("/voice-mode");      
+    else if (d === "2") r.redirect("/t9-mode");    
+    else if (d === "#") r.redirect("/music-mode"); 
+    else r.redirect("/twiml");
+    res.type("text/xml").send(r.toString());
+});
 
-        const reply = await askGemini(getSession(CallSid), SpeechResult);
+// 2. VOICE/T9 (Standard)
+app.all("/voice-mode", (req, res) => {
+    const r = new VoiceResponse();
+    r.play({ digits: "w" }); 
+    r.gather({ input: "speech", action: "/voice-process", timeout: 4 });
+    const g = r.gather({ input: "dtmf", numDigits: 1, action: "/router" });
+    g.say("1 to speak. 0 menu.");
+    res.type("text/xml").send(r.toString());
+});
+
+app.all("/voice-process", async (req, res) => {
+    const r = new VoiceResponse();
+    const text = req.body.SpeechResult;
+    if (text) {
+        const reply = await askGemini(getSession(req.body.CallSid), text);
         r.say(reply);
-        r.gather({ input: "speech dtmf", numDigits: 1, finishOnKey: "", action: "/main-gather" });
-        res.type("text/xml").send(r.toString());
-    } catch (e) { console.error(e); }
+        const g = r.gather({ input: "dtmf", numDigits: 1, action: "/router" });
+        g.say("1 reply. 2 type. Hash music.");
+    } else r.redirect("/voice-mode");
+    res.type("text/xml").send(r.toString());
 });
 
+app.all("/t9-mode", (req, res) => {
+    const r = new VoiceResponse();
+    const g = r.gather({ input: "dtmf", action: "/t9-process", finishOnKey: "*", numDigits: 50, timeout: 15 });
+    if (!getSession(req.body.CallSid).t9Buffer) g.say(CONFIG.MESSAGES.T9_MODE);
+    res.type("text/xml").send(r.toString());
+});
+
+app.all("/t9-process", async (req, res) => {
+    const r = new VoiceResponse();
+    const d = req.body.Digits;
+    const session = getSession(req.body.CallSid);
+    if (d) session.t9Buffer += d;
+    const text = parseT9(session.t9Buffer, 'en');
+
+    if (text.length > 0) {
+        const reply = await askGemini(session, text);
+        session.t9Buffer = ""; 
+        r.say(reply);
+        const g = r.gather({ input: "dtmf", numDigits: 1, action: "/router" });
+        g.say("1 speak. 2 type.");
+    } else r.redirect("/t9-mode");
+    res.type("text/xml").send(r.toString());
+});
+
+// 3. MUSIC MODE
 app.all("/music-mode", (req, res) => {
     const r = new VoiceResponse();
-    const g = r.gather({ input: "speech dtmf", numDigits: 1, finishOnKey: "", action: "/music-logic", timeout: 5, bargeIn: true });
-    g.say(CONFIG.MESSAGES.MUSIC_WELCOME);
+    const g = r.gather({ input: "dtmf", numDigits: 1, action: "/music-logic", timeout: 10, bargeIn: true });
+    g.say(CONFIG.MESSAGES.MUSIC_MENU);
     res.type("text/xml").send(r.toString());
 });
 
 app.all("/music-logic", (req, res) => {
     const r = new VoiceResponse();
-    const { CallSid, Digits, SpeechResult } = req.body;
-    const session = getSession(CallSid);
+    const d = req.body.Digits;
+    const session = getSession(req.body.CallSid);
 
-    if (Digits === "0") { r.redirect("/twiml"); return res.type("text/xml").send(r.toString()); }
+    if (d === "0") { r.redirect("/twiml"); return res.type("text/xml").send(r.toString()); }
     
-    if (["4", "5", "6"].includes(Digits)) {
-        if (session.musicHistory.length === 0) { r.say(CONFIG.MESSAGES.NO_HISTORY); r.redirect("/music-mode"); return res.type("text/xml").send(r.toString()); }
-        if (Digits === "4" && session.index > 0) session.index--;
-        if (Digits === "6" && session.index < session.musicHistory.length - 1) session.index++;
-        
-        const song = session.musicHistory[session.index];
-        r.say(`Playing ${song.title}`);
-        const g = r.gather({ input: "dtmf", numDigits: 1, finishOnKey: "", action: "/music-logic" });
-        g.play(song.url);
-        r.redirect("/music-mode");
+    if (d === "1") {
+        session.mode = "normal";
+        r.say("Say song.");
+        r.gather({ input: "speech", action: "/music-search", timeout: 4 });
         return res.type("text/xml").send(r.toString());
     }
 
-    if (SpeechResult) {
-        searchAndDownload(CallSid, SpeechResult);
-        r.say(CONFIG.MESSAGES.SEARCHING);
-        r.redirect("/music-wait-loop");
+    if (d === "2") {
+        session.mode = "liked";
+        const likes = getLikedSongs();
+        if (likes.length === 0) { r.say(CONFIG.MESSAGES.EMPTY); r.redirect("/music-mode"); } 
+        else {
+            session.likedIndex = 0;
+            searchAndDownload(req.body.CallSid, likes[0]);
+            r.say(`Loading ${likes[0]}`);
+            r.redirect("/music-wait-loop");
+        }
         return res.type("text/xml").send(r.toString());
     }
-    r.say("I didn't catch that.");
     r.redirect("/music-mode");
     res.type("text/xml").send(r.toString());
 });
 
+app.all("/music-search", (req, res) => {
+    const r = new VoiceResponse();
+    const text = req.body.SpeechResult;
+    if (text) {
+        searchAndDownload(req.body.CallSid, text);
+        r.say(CONFIG.MESSAGES.SEARCHING);
+        r.redirect("/music-wait-loop");
+    } else r.redirect("/music-mode");
+    res.type("text/xml").send(r.toString());
+});
+
+// 4. MUSIC PLAYER & RESUME LOGIC
 app.all("/music-wait-loop", (req, res) => {
     const r = new VoiceResponse();
     const dl = downloadQueue.get(req.body.CallSid);
-
+    
     if (!dl) { r.redirect("/music-mode"); return res.type("text/xml").send(r.toString()); }
 
     if (dl.status === 'done') {
         const session = getSession(req.body.CallSid);
-        session.musicHistory.push({ title: dl.title, url: dl.url });
-        session.index = session.musicHistory.length - 1;
-
+        
+        // SAVE FOR RESUME
+        session.currentSong = { title: dl.title, url: dl.url, filename: dl.filename };
+        session.playStartTime = Date.now(); // ⏱️ Start Timer
+        
         r.say(`Playing ${dl.title}`);
-        const g = r.gather({ input: "dtmf", numDigits: 1, finishOnKey: "", action: "/music-logic" });
+        const g = r.gather({ input: "dtmf", numDigits: 1, action: "/music-controls", bargeIn: true });
         g.play(dl.url);
-        r.redirect("/music-mode");
-    } else if (dl.status === 'error' || Date.now() - dl.startTime > 90000) { // Increased timeout for retry
-        r.say("Download failed.");
+        
+        if (session.mode === "liked") r.redirect("/music-next-liked");
+        else r.redirect("/music-mode");
+
+    } else if (dl.status === 'error' || Date.now() - dl.startTime > 90000) {
+        r.say("Failed.");
         downloadQueue.delete(req.body.CallSid);
         r.redirect("/music-mode");
     } else {
         r.pause({ length: 2 });
         r.redirect("/music-wait-loop");
     }
+    res.type("text/xml").send(r.toString());
+});
+
+app.all("/music-controls", (req, res) => {
+    const r = new VoiceResponse();
+    const d = req.body.Digits;
+    const session = getSession(req.body.CallSid);
+
+    // ⏸️ PAUSE LOGIC
+    if (d === "5") {
+        // Calculate how long we played
+        const now = Date.now();
+        const playedMs = now - session.playStartTime;
+        // If we are already resumed, add previous offset
+        const totalPlayedSecs = (playedMs / 1000) + (session.pausedAt || 0);
+        
+        session.pausedAt = totalPlayedSecs; // Save precise stop time
+        
+        r.say(CONFIG.MESSAGES.PAUSED);
+        r.redirect("/music-pause-loop"); // Go to long loop
+        return res.type("text/xml").send(r.toString());
+    }
+
+    if (d === "*") {
+        const g = r.gather({ input: "dtmf", numDigits: 1, action: "/music-options" });
+        g.say("4 Like. 6 Remove.");
+        return res.type("text/xml").send(r.toString());
+    }
+
+    // Next/Prev Logic...
+    if (session.mode === "liked") {
+        if (d === "6") { r.redirect("/music-next-liked"); return res.type("text/xml").send(r.toString()); }
+        if (d === "4") { session.likedIndex = Math.max(0, session.likedIndex - 1); r.redirect("/music-play-liked"); return res.type("text/xml").send(r.toString()); }
+    }
+    r.redirect("/music-mode");
+    res.type("text/xml").send(r.toString());
+});
+
+// ⏸️ PAUSE LOOP (Keeps call alive)
+app.all("/music-pause-loop", (req, res) => {
+    const r = new VoiceResponse();
+    // Wait for 5 to Resume
+    const g = r.gather({ input: "dtmf", numDigits: 1, action: "/music-resume", timeout: 20 });
+    // Play silence to keep line open
+    g.pause({ length: 20 });
+    
+    // Recursive loop to keep connection for minutes
+    r.redirect("/music-pause-loop");
+    res.type("text/xml").send(r.toString());
+});
+
+// ▶️ RESUME LOGIC (The FFmpeg Trick)
+app.all("/music-resume", async (req, res) => {
+    const r = new VoiceResponse();
+    const d = req.body.Digits;
+    const session = getSession(req.body.CallSid);
+    
+    if (d === "5" && session.currentSong) {
+        r.say(CONFIG.MESSAGES.RESUMING);
+        
+        // Slice the MP3
+        const newFilename = await sliceMp3(session.currentSong.filename, session.pausedAt);
+        
+        if (newFilename) {
+            const newUrl = `${CONFIG.BASE_URL}/music/${newFilename}`;
+            session.playStartTime = Date.now(); // Reset timer for new segment
+            
+            const g = r.gather({ input: "dtmf", numDigits: 1, action: "/music-controls", bargeIn: true });
+            g.play(newUrl);
+            
+            if (session.mode === "liked") r.redirect("/music-next-liked");
+            else r.redirect("/music-mode");
+        } else {
+            r.say("Error resuming. Restarting.");
+            r.redirect("/music-mode"); // Fallback
+        }
+    } else {
+        // Keeps pausing if wrong key
+        r.redirect("/music-pause-loop");
+    }
+    res.type("text/xml").send(r.toString());
+});
+
+app.all("/music-options", (req, res) => {
+    const r = new VoiceResponse();
+    const d = req.body.Digits;
+    const session = getSession(req.body.CallSid);
+
+    if (d === "4" && session.currentSong) {
+        saveLikedSong(session.currentSong.title);
+        r.say(CONFIG.MESSAGES.SAVED);
+    } else if (d === "6" && session.currentSong) {
+        removeLikedSong(session.currentSong.title);
+        r.say(CONFIG.MESSAGES.REMOVED);
+    }
+    // Return to pause menu so user can resume
+    r.redirect("/music-pause-loop");
+    res.type("text/xml").send(r.toString());
+});
+
+app.all("/music-next-liked", (req, res) => {
+    const r = new VoiceResponse();
+    const session = getSession(req.body.CallSid);
+    const likes = getLikedSongs();
+    session.likedIndex++;
+    if (session.likedIndex >= likes.length) session.likedIndex = 0; 
+    r.redirect("/music-play-liked");
+    res.type("text/xml").send(r.toString());
+});
+
+app.all("/music-play-liked", (req, res) => {
+    const r = new VoiceResponse();
+    const session = getSession(req.body.CallSid);
+    const likes = getLikedSongs();
+    if (likes.length === 0) { r.redirect("/music-mode"); return res.type("text/xml").send(r.toString()); }
+    
+    searchAndDownload(req.body.CallSid, likes[session.likedIndex]);
+    r.say(`Loading ${likes[session.likedIndex]}`);
+    r.redirect("/music-wait-loop");
     res.type("text/xml").send(r.toString());
 });
 
