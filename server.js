@@ -17,7 +17,7 @@ dotenv.config();
 const CONFIG = {
     PORT: process.env.PORT || 3000,
     // ⚠️ IMPORTANT: Change this to your actual Render URL!
-    BASE_URL: process.env.RENDER_EXTERNAL_URL || "https://yt-dlp-gemini-ai-call.onrender.com", 
+    BASE_URL: process.env.RENDER_EXTERNAL_URL || "https://gpt-phone-call.onrender.com", 
     DOWNLOAD_DIR: "/tmp",
     
     VERIFIED_CALLERS:[
