@@ -1,4 +1,4 @@
-console.log("🚀 Starting Server: STRICT STT + NATIVE ACCENTS + STABLE AUDIO...");
+console.log("🚀 Starting Server: DIAGNOSTIC MODE + BUG FIXES...");
 
 import express from "express";
 import dotenv from "dotenv";
@@ -32,45 +32,42 @@ const CONFIG = {
 
 if (!fs.existsSync(CONFIG.DOWNLOAD_DIR)) fs.mkdirSync(CONFIG.DOWNLOAD_DIR);
 
-// ==============================================================================
-// 🧠 GEMINI MODELS (STRICTLY SEPARATED)
-// ==============================================================================
-
-// Helper to detect language for Voice selection
 function isHebrewText(text) {
     return /[\u0590-\u05FF]/.test(text);
 }
 
-// MODEL 1: THE TRANSCRIBER (Strict API mode, NO hallucinations)
+// ==============================================================================
+// 🧠 GEMINI MODELS
+// ==============================================================================
+
 async function transcribeAudio(base64Audio) {
     if (CONFIG.GEMINI_KEYS.length === 0) return null;
+
+    // Simplified prompt, removed systemInstruction to prevent conflicts in 2.5-flash
+    const prompt = `You are a strict transcriber. Listen to the audio and extract the exact text spoken. It can be Hebrew or English. Remove hesitations. Output ONLY the clean text. If the audio is silent or unintelligible, output the word "SILENCE". Do not add ANY conversational text.`;
 
     for (const key of CONFIG.GEMINI_KEYS) {
         try {
             const genAI = new GoogleGenerativeAI(key);
-            // System instruction forces it to act ONLY as an STT engine
-            const model = genAI.getGenerativeModel({ 
-                model: "gemini-2.5-flash",
-                systemInstruction: "You are an automated Speech-to-Text API. Your ONLY function is to transcribe audio into text. DO NOT add conversational replies. DO NOT say 'I can help with that'. If the audio is silent, contains only background noise, or is unintelligible, you MUST output exactly the word 'SILENCE' and nothing else."
-            });
+            const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
             
             const result = await model.generateContent([
-                "Transcribe the following audio exactly as spoken.", 
+                prompt, 
                 { inlineData: { mimeType: "audio/mp3", data: base64Audio } }
             ]);
             
             const text = result.response.text().trim();
-            // If it outputs SILENCE, or hallucinates "I need help", catch it
-            if (text.includes("SILENCE") || text.includes("I can help") || text.length < 2) return null;
+            console.log(`[RAW GEMINI TRANSCRIPT]: ${text}`); // Logs exactly what Gemini sees
+            
+            if (text.includes("SILENCE") || text.length < 2 || text.includes("I can help")) return null;
             return text;
         } catch (e) {
-            console.error("Transcriber Key Failed, trying next...");
+            console.error(`Transcriber Key Failed: ${e.message}`);
         }
     }
     return null;
 }
 
-// MODEL 2: THE CHAT BOT (Fluent Language Forced)
 async function chatWithGemini(session, userInputText) {
     if (CONFIG.GEMINI_KEYS.length === 0) return "No API keys configured.";
     
@@ -79,14 +76,13 @@ async function chatWithGemini(session, userInputText) {
             const genAI = new GoogleGenerativeAI(key);
             const model = genAI.getGenerativeModel({ 
                 model: "gemini-2.5-flash",
-                // Forcing the model to never mix languages so Edge-TTS doesn't give a weird accent
                 systemInstruction: "You are a helpful phone assistant. Answer briefly. IMPORTANT: Never mix English and Hebrew in the same response. If the user speaks Hebrew, reply ONLY in Hebrew. If English, reply ONLY in English."
             });
             const chat = model.startChat({ history: session.chatHistory });
             const result = await chat.sendMessage(userInputText);
             return result.response.text();
         } catch (e) {
-            console.error("Chat Key Failed, trying next...");
+            console.error("Chat Key Failed...");
         }
     }
     return "Sorry, I had a problem processing that.";
@@ -104,9 +100,7 @@ async function generateFreeTTS(text) {
         const safeText = text.replace(/["'\n]/g, ' ').trim();
         if (!safeText) return resolve(null);
         
-        // Pure Israeli voice for Hebrew, Pure American voice for English
         const voice = isHebrewText(safeText) ? 'he-IL-AvriNeural' : 'en-US-ChristopherNeural';
-
         const child = spawn('edge-tts',['--text', safeText, '--voice', voice, '--write-media', outputPath]);
         
         child.on('close', (code) => {
@@ -153,14 +147,21 @@ async function searchAndDownloadYTDLP(callSid, query) {
 
 async function fetchTwilioRecording(recordingUrl) {
     try {
-        // 500ms delay to ensure Twilio is fully done encoding the MP3 to prevent corrupted files
         await new Promise(resolve => setTimeout(resolve, 500));
         const audioRes = await fetch(recordingUrl + ".mp3");
+        
+        if (!audioRes.ok) return "FETCH_FAILED";
+
+        const contentType = audioRes.headers.get('content-type');
+        if (contentType && contentType.includes('text/html')) {
+            console.error("TWILIO AUTH ERROR: Twilio Media Auth is turned ON in Twilio Console!");
+            return "AUTH_ERROR";
+        }
+
         const arrayBuffer = await audioRes.arrayBuffer();
         return Buffer.from(arrayBuffer).toString('base64');
     } catch (e) {
-        console.error("Failed to fetch Twilio recording:", e);
-        return null;
+        return "FETCH_FAILED";
     }
 }
 
@@ -180,7 +181,6 @@ app.get("/music/:filename", (req, res) => {
     } else res.status(404).send("File Gone");
 });
 
-// 1. MAIN MENU
 app.all("/twiml", async (req, res) => {
     const caller = req.body.From;
     if (!CONFIG.VERIFIED_CALLERS.includes(caller)) { const r = new VoiceResponse(); r.reject(); return res.type("text/xml").send(r.toString()); }
@@ -188,7 +188,6 @@ app.all("/twiml", async (req, res) => {
     sessions.delete(req.body.CallSid);
     const r = new VoiceResponse();
     
-    // Single language to prevent accents (translate this string to Hebrew if you want it all in Hebrew)
     const menuTTS = await generateFreeTTS("Main menu. Press 1 for chat, or hash for music.");
     const g = r.gather({ input: "dtmf", numDigits: 1, action: "/router", timeout: 10, finishOnKey: "" });
     if (menuTTS) g.play(`${CONFIG.BASE_URL}/music/${menuTTS}`);
@@ -200,58 +199,65 @@ app.all("/twiml", async (req, res) => {
 app.all("/router", (req, res) => {
     const r = new VoiceResponse();
     const d = req.body.Digits;
-
     if (d === "1") r.redirect("/voice-mode");      
     else if (d === "#") r.redirect("/music-mode"); 
     else r.redirect("/twiml");
-    
     res.type("text/xml").send(r.toString());
 });
 
-// 2. VOICE CHAT (Zero-Cost STT)
+// ------------------------------------------------------------------------------
+// VOICE CHAT
+// ------------------------------------------------------------------------------
 app.all("/voice-mode", async (req, res) => {
     const r = new VoiceResponse();
     const beepTTS = await generateFreeTTS("Please speak after the beep, then press hash.");
     if (beepTTS) r.play(`${CONFIG.BASE_URL}/music/${beepTTS}`);
     
-    // Added timeout="5" and trim="trim-silence" to fix empty audio loops
-    r.record({ action: "/voice-process", finishOnKey: "#", maxLength: 60, playBeep: true, trim: "trim-silence", timeout: 5 });
+    // Removed trim="trim-silence" which aggressively deletes short audio
+    r.record({ action: "/voice-process", finishOnKey: "#", maxLength: 60, playBeep: true, timeout: 5 });
     res.type("text/xml").send(r.toString());
 });
 
 app.all("/voice-process", async (req, res) => {
     const r = new VoiceResponse();
     
-    if (req.body.RecordingUrl) {
-        const base64Audio = await fetchTwilioRecording(req.body.RecordingUrl);
-        if (base64Audio && base64Audio.length > 1000) { // Verify audio isn't completely empty
-            const cleanText = await transcribeAudio(base64Audio);
-            console.log(`[Chat - Transcribed]: ${cleanText}`);
-            
-            if (cleanText) {
-                const replyText = await chatWithGemini(getSession(req.body.CallSid), cleanText);
-                console.log(`[Chat - AI Reply]: ${replyText}`);
-                
-                const ttsFilename = await generateFreeTTS(replyText);
-                if (ttsFilename) r.play(`${CONFIG.BASE_URL}/music/${ttsFilename}`);
-            }
+    if (!req.body.RecordingUrl) {
+        const tts = await generateFreeTTS("No audio received from Twilio.");
+        if (tts) r.play(`${CONFIG.BASE_URL}/music/${tts}`);
+        r.redirect("/voice-mode");
+        return res.type("text/xml").send(r.toString());
+    }
+
+    const base64Audio = await fetchTwilioRecording(req.body.RecordingUrl);
+    if (base64Audio === "AUTH_ERROR") {
+        const tts = await generateFreeTTS("Twilio Authentication Error. Please turn off HTTP Auth on Media URLs in your Twilio Console.");
+        if (tts) r.play(`${CONFIG.BASE_URL}/music/${tts}`);
+    } else if (base64Audio && base64Audio !== "FETCH_FAILED") {
+        const cleanText = await transcribeAudio(base64Audio);
+        if (cleanText) {
+            const replyText = await chatWithGemini(getSession(req.body.CallSid), cleanText);
+            const ttsFilename = await generateFreeTTS(replyText);
+            if (ttsFilename) r.play(`${CONFIG.BASE_URL}/music/${ttsFilename}`);
+        } else {
+            const errorTts = await generateFreeTTS("I couldn't understand the audio. Please speak clearly.");
+            if (errorTts) r.play(`${CONFIG.BASE_URL}/music/${errorTts}`);
         }
     }
-    
+
     const g = r.gather({ input: "dtmf", numDigits: 1, action: "/router", finishOnKey: "" });
     const loopTTS = await generateFreeTTS("Press 1 to speak again, or hash for music.");
     if (loopTTS) g.play(`${CONFIG.BASE_URL}/music/${loopTTS}`);
-    
     res.type("text/xml").send(r.toString());
 });
 
-// 3. MUSIC MODE
+// ------------------------------------------------------------------------------
+// MUSIC MODE
+// ------------------------------------------------------------------------------
 app.all("/music-mode", async (req, res) => {
     const r = new VoiceResponse();
     const menuTTS = await generateFreeTTS("Music mode. Press 1 to search for a song.");
     const g = r.gather({ input: "dtmf", numDigits: 1, action: "/music-logic", timeout: 10, finishOnKey: "" });
     if (menuTTS) g.play(`${CONFIG.BASE_URL}/music/${menuTTS}`);
-    
     res.type("text/xml").send(r.toString());
 });
 
@@ -261,8 +267,8 @@ app.all("/music-logic", async (req, res) => {
         const promptTts = await generateFreeTTS("Say the song name, then press hash.");
         if (promptTts) r.play(`${CONFIG.BASE_URL}/music/${promptTts}`);
         
-        // Added timeout="5" and trim="trim-silence"
-        r.record({ action: "/music-search", maxLength: 15, playBeep: true, finishOnKey: "#", trim: "trim-silence", timeout: 5 });
+        // Removed trim="trim-silence"
+        r.record({ action: "/music-search", maxLength: 15, playBeep: true, finishOnKey: "#", timeout: 5 });
         return res.type("text/xml").send(r.toString());
     }
     r.redirect("/twiml");
@@ -272,30 +278,52 @@ app.all("/music-logic", async (req, res) => {
 app.all("/music-search", async (req, res) => {
     const r = new VoiceResponse();
 
-    if (req.body.RecordingUrl) {
-        const base64Audio = await fetchTwilioRecording(req.body.RecordingUrl);
-        if (base64Audio && base64Audio.length > 1000) {
-            const cleanQuery = await transcribeAudio(base64Audio);
-            console.log(`[Music - Searching]: ${cleanQuery}`);
-
-            if (cleanQuery) {
-                searchAndDownloadYTDLP(req.body.CallSid, cleanQuery);
-                
-                // Matches the language of the query!
-                const searchString = isHebrewText(cleanQuery) ? `מחפש את ${cleanQuery}` : `Searching for ${cleanQuery}`;
-                const waitTts = await generateFreeTTS(searchString);
-                
-                if (waitTts) r.play(`${CONFIG.BASE_URL}/music/${waitTts}`);
-                r.redirect("/music-wait-loop");
-                return res.type("text/xml").send(r.toString());
-            }
-        }
+    // 1. Diagnostics: Did Twilio send audio?
+    if (!req.body.RecordingUrl) {
+        const err1 = await generateFreeTTS("No audio was recorded. Make sure to speak after the beep.");
+        if (err1) r.play(`${CONFIG.BASE_URL}/music/${err1}`);
+        r.redirect("/music-mode");
+        return res.type("text/xml").send(r.toString());
     }
+
+    // 2. Diagnostics: Was fetching the audio blocked?
+    const base64Audio = await fetchTwilioRecording(req.body.RecordingUrl);
+    if (base64Audio === "AUTH_ERROR") {
+        const errAuth = await generateFreeTTS("Twilio Authentication Error. Please turn off HTTP Auth on Media URLs in your Twilio Settings.");
+        if (errAuth) r.play(`${CONFIG.BASE_URL}/music/${errAuth}`);
+        r.redirect("/music-mode");
+        return res.type("text/xml").send(r.toString());
+    }
+
+    if (base64Audio && base64Audio !== "FETCH_FAILED") {
+        // 3. Diagnostics: Did Gemini transcribe it?
+        const cleanQuery = await transcribeAudio(base64Audio);
+        if (!cleanQuery) {
+            const errGemini = await generateFreeTTS("I could not understand the song name. Let's try again.");
+            if (errGemini) r.play(`${CONFIG.BASE_URL}/music/${errGemini}`);
+            r.redirect("/music-mode");
+            return res.type("text/xml").send(r.toString());
+        }
+
+        // Success!
+        searchAndDownloadYTDLP(req.body.CallSid, cleanQuery);
+        const searchString = isHebrewText(cleanQuery) ? `מחפש את ${cleanQuery}` : `Searching for ${cleanQuery}`;
+        const waitTts = await generateFreeTTS(searchString);
+        if (waitTts) r.play(`${CONFIG.BASE_URL}/music/${waitTts}`);
+        r.redirect("/music-wait-loop");
+        return res.type("text/xml").send(r.toString());
+    }
+
+    // Fallback if fetch fails for random network reason
+    const errNet = await generateFreeTTS("There was a network error fetching your audio. Please try again.");
+    if (errNet) r.play(`${CONFIG.BASE_URL}/music/${errNet}`);
     r.redirect("/music-mode");
     res.type("text/xml").send(r.toString());
 });
 
-// 4. MUSIC PLAYER WAIT LOOP
+// ------------------------------------------------------------------------------
+// MUSIC WAIT LOOP
+// ------------------------------------------------------------------------------
 app.all("/music-wait-loop", async (req, res) => {
     const r = new VoiceResponse();
     const dl = downloadQueue.get(req.body.CallSid);
@@ -308,7 +336,7 @@ app.all("/music-wait-loop", async (req, res) => {
         r.redirect("/twiml");
 
     } else if (dl.status === 'error' || Date.now() - dl.startTime > 60000) {
-        const failTts = await generateFreeTTS("Error downloading the song.");
+        const failTts = await generateFreeTTS("Error downloading the song from the internet.");
         if (failTts) r.play(`${CONFIG.BASE_URL}/music/${failTts}`);
         downloadQueue.delete(req.body.CallSid);
         r.redirect("/music-mode");
