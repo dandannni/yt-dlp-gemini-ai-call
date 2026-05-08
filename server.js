@@ -1,4 +1,4 @@
-console.log("🚀 Starting Stable Twilio + Gemini Server...");
+console.log("🚀 Starting Server: ZERO-COST AUDIO + DUAL GEMINI + YTDLP...");
 
 import express from "express";
 import dotenv from "dotenv";
@@ -8,178 +8,107 @@ import path from "path";
 import fs from "fs";
 import { spawn } from "child_process";
 import { v4 as uuidv4 } from "uuid";
-import fetch from "node-fetch";
 
 dotenv.config();
 
-// ======================================================================
-// CONFIG
-// ======================================================================
-
+// ==============================================================================
+// ⚙️ CONFIGURATION
+// ==============================================================================
 const CONFIG = {
     PORT: process.env.PORT || 3000,
-    BASE_URL: process.env.RENDER_EXTERNAL_URL || "https://your-app.onrender.com",
+    // ⚠️ IMPORTANT: Change this to your actual Render URL!
+    BASE_URL: process.env.RENDER_EXTERNAL_URL || "https://yt-dlp-gemini-ai-call.onrender.com", 
     DOWNLOAD_DIR: "/tmp",
-
-    VERIFIED_CALLERS: [
-        "+972548498889",
-        "+972554402506",
-        "+972525585720",
-        "+972528263032",
-        "+972583230268"
+    
+    VERIFIED_CALLERS:[
+        "+972548498889", "+972554402506", "+972525585720", 
+        "+972528263032", "+972583230268"
     ],
-
-    GEMINI_KEYS: [
-        process.env.GEMINI_API_KEY,
-        process.env.GEMINI_API_KEY_2,
-        process.env.GEMINI_API_KEY_3,
-        process.env.GEMINI_API_KEY_4
-    ].filter(Boolean)
+    
+    // Multiple keys for maximum free tier!
+    GEMINI_KEYS:[
+        process.env.GEMINI_API_KEY, process.env.GEMINI_API_KEY_2,
+        process.env.GEMINI_API_KEY_3, process.env.GEMINI_API_KEY_4
+    ].filter(key => key)
 };
 
-if (!fs.existsSync(CONFIG.DOWNLOAD_DIR)) {
-    fs.mkdirSync(CONFIG.DOWNLOAD_DIR);
-}
+// Ensure temp directory exists
+if (!fs.existsSync(CONFIG.DOWNLOAD_DIR)) fs.mkdirSync(CONFIG.DOWNLOAD_DIR);
 
-// ======================================================================
-// HELPERS
-// ======================================================================
+// ==============================================================================
+// 🧠 GEMINI MODELS (FREE TIER)
+// ==============================================================================
 
-function isHebrew(text = "") {
-    return /[\u0590-\u05FF]/.test(text);
-}
-
-function cleanSong(text = "") {
-    return text
-        .replace(/^play\s+/i, "")
-        .replace(/^search\s+/i, "")
-        .replace(/^נגן\s+/i, "")
-        .trim();
-}
-
-// ======================================================================
-// GEMINI TRANSCRIBE
-// ======================================================================
-
+// MODEL 1: THE TRANSCRIBER (Filters stutters, extracts exact query)
 async function transcribeAudio(base64Audio) {
-
-    const prompt = `
-Transcribe exactly.
-Hebrew or English allowed.
-Return only text.
-If unclear return SILENCE.
-`;
+    if (CONFIG.GEMINI_KEYS.length === 0) return null;
+    
+    const prompt = `You are a transcriber. Listen to the audio and extract the exact text. 
+    It could be Hebrew or English. Remove all hesitations, stutters, and filler words. 
+    Output ONLY the final clean text. If no speech is detected, output "SILENCE".`;
 
     for (const key of CONFIG.GEMINI_KEYS) {
-
         try {
-
             const genAI = new GoogleGenerativeAI(key);
-
-            const model = genAI.getGenerativeModel({
-                model: "gemini-2.5-flash-preview-04-17"
-            });
-
+            const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
             const result = await model.generateContent([
-                {
-                    inlineData: {
-                        mimeType: "audio/mpeg",
-                        data: base64Audio
-                    }
-                },
-                prompt
+                prompt, 
+                { inlineData: { mimeType: "audio/mp3", data: base64Audio } }
             ]);
-
             const text = result.response.text().trim();
-
-            console.log("[TRANSCRIPT]", text);
-
-            if (!text || text === "SILENCE") return null;
-
-            return text;
-
+            return text.includes("SILENCE") ? null : text;
         } catch (e) {
-            console.error("Gemini error:", e.message);
+            console.error("Transcriber Key Failed, trying next...");
         }
     }
-
     return null;
 }
 
-// ======================================================================
-// TWILIO RECORDING FETCH (FIXED)
-// ======================================================================
-
-async function fetchTwilioRecording(url) {
-
-    const sid = process.env.TWILIO_ACCOUNT_SID;
-    const token = process.env.TWILIO_AUTH_TOKEN;
-
-    const auth = Buffer
-        .from(`${sid}:${token}`)
-        .toString("base64");
-
-    for (let i = 0; i < 10; i++) {
-
+// MODEL 2: THE CHAT BOT (Conversational)
+async function chatWithGemini(session, userInputText) {
+    if (CONFIG.GEMINI_KEYS.length === 0) return "No API keys configured.";
+    
+    for (const key of CONFIG.GEMINI_KEYS) {
         try {
-
-            const res = await fetch(url + ".mp3", {
-                headers: {
-                    Authorization: `Basic ${auth}`
-                }
+            const genAI = new GoogleGenerativeAI(key);
+            const model = genAI.getGenerativeModel({ 
+                model: "gemini-2.5-flash",
+                systemInstruction: "You are a friendly, helpful phone assistant. Answer briefly. If the user speaks Hebrew, answer in Hebrew. If English, answer in English."
             });
-
-            console.log("[TWILIO STATUS]", res.status);
-
-            if (!res.ok) {
-                await new Promise(r => setTimeout(r, 2000));
-                continue;
-            }
-
-            const buffer = Buffer.from(await res.arrayBuffer());
-
-            console.log("[AUDIO SIZE]", buffer.length);
-
-            if (buffer.length < 5000) {
-                await new Promise(r => setTimeout(r, 2000));
-                continue;
-            }
-
-            return buffer.toString("base64");
-
+            const chat = model.startChat({ history: session.chatHistory });
+            const result = await chat.sendMessage(userInputText);
+            return result.response.text();
         } catch (e) {
-            console.error("Fetch error:", e.message);
+            console.error("Chat Key Failed, trying next...");
         }
     }
-
-    return null;
+    return "שגיאה בתקשורת. Sorry, I had a problem processing that.";
 }
 
-// ======================================================================
-// TTS (safe)
-// ======================================================================
-
-async function tts(text) {
-
+// ==============================================================================
+// 🔊 ZERO-COST TEXT-TO-SPEECH (Edge-TTS)
+// ==============================================================================
+async function generateFreeTTS(text) {
     return new Promise((resolve) => {
-
         const id = uuidv4();
-        const file = `${id}.mp3`;
-        const out = path.join(CONFIG.DOWNLOAD_DIR, file);
+        const filename = `tts_${id}.mp3`;
+        const outputPath = path.join(CONFIG.DOWNLOAD_DIR, filename);
+        
+        // Remove quotes/newlines that could break the bash command
+        const safeText = text.replace(/["'\n]/g, ' ').trim();
+        if (!safeText) return resolve(null);
+        
+        // Auto-detect Hebrew characters vs English
+        const isHebrew = /[\u0590-\u05FF]/.test(safeText);
+        const voice = isHebrew ? 'he-IL-AvriNeural' : 'en-US-ChristopherNeural';
 
-        const voice = isHebrew(text)
-            ? "he-IL-AvriNeural"
-            : "en-US-ChristopherNeural";
-
-        const p = spawn("edge-tts", [
-            "--text", text,
-            "--voice", voice,
-            "--write-media", out
-        ]);
-
-        p.on("close", (c) => {
-            if (c === 0 && fs.existsSync(out)) {
-                resolve(file);
+        const child = spawn('edge-tts',['--text', safeText, '--voice', voice, '--write-media', outputPath]);
+        
+        child.on('close', (code) => {
+            if (code === 0 && fs.existsSync(outputPath)) {
+                // Delete file after 5 minutes to keep server clean
+                setTimeout(() => { if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath) }, 300000);
+                resolve(filename);
             } else {
                 resolve(null);
             }
@@ -187,271 +116,212 @@ async function tts(text) {
     });
 }
 
-// ======================================================================
-// EXPRESS
-// ======================================================================
+// ==============================================================================
+// 💾 SESSION & DOWNLOAD LOGIC
+// ==============================================================================
+const sessions = new Map();
+const downloadQueue = new Map();
 
+function getSession(callSid) {
+    if (!sessions.has(callSid)) {
+        sessions.set(callSid, { chatHistory:[], currentSong: null, mode: "normal" });
+    }
+    return sessions.get(callSid);
+}
+
+async function searchAndDownloadYTDLP(callSid, query) {
+    downloadQueue.set(callSid, { status: 'pending', startTime: Date.now() });
+    const id = uuidv4();
+    const outputTemplate = path.join(CONFIG.DOWNLOAD_DIR, `${id}.%(ext)s`);
+    
+    const args =[`scsearch1:${query}`, '-x', '--audio-format', 'mp3', '--postprocessor-args', 'ffmpeg:-ac 1 -ar 16000', '--no-playlist', '--force-ipv4', '-o', outputTemplate];
+    
+    const child = spawn('yt-dlp', args);
+    child.on('close', () => {
+        const files = fs.readdirSync(CONFIG.DOWNLOAD_DIR);
+        const found = files.find(f => f.startsWith(id) && f.endsWith('.mp3'));
+        
+        if (found) {
+            downloadQueue.set(callSid, { status: 'done', url: `${CONFIG.BASE_URL}/music/${found}`, title: query, filename: found });
+            // Cleanup song after 20 minutes
+            setTimeout(() => { if (fs.existsSync(path.join(CONFIG.DOWNLOAD_DIR, found))) fs.unlinkSync(path.join(CONFIG.DOWNLOAD_DIR, found)); }, 1200000);
+        } else {
+            downloadQueue.set(callSid, { status: 'error' });
+        }
+    });
+}
+
+// Downloads the audio from Twilio and forces it into an MP3 buffer for Gemini
+async function fetchTwilioRecording(recordingUrl) {
+    try {
+        const audioRes = await fetch(recordingUrl + ".mp3");
+        const arrayBuffer = await audioRes.arrayBuffer();
+        return Buffer.from(arrayBuffer).toString('base64');
+    } catch (e) {
+        console.error("Failed to fetch Twilio recording:", e);
+        return null;
+    }
+}
+
+// ==============================================================================
+// 🚀 ROUTING & EXPRESS SERVER
+// ==============================================================================
 const app = express();
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
-
 const VoiceResponse = twilio.twiml.VoiceResponse;
 
-const sessions = new Map();
-const downloads = new Map();
-
-function getSession(id) {
-    if (!sessions.has(id)) {
-        sessions.set(id, { history: [] });
+// Serve audio files directly to Twilio
+app.get("/music/:filename", (req, res) => {
+    const f = path.resolve(CONFIG.DOWNLOAD_DIR, req.params.filename);
+    if (fs.existsSync(f)) {
+        res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Content-Length': fs.statSync(f).size });
+        fs.createReadStream(f).pipe(res);
+    } else {
+        res.status(404).send("File Gone");
     }
-    return sessions.get(id);
-}
-
-// ======================================================================
-// AUDIO SERVER
-// ======================================================================
-
-app.get("/music/:file", (req, res) => {
-
-    const f = path.join(CONFIG.DOWNLOAD_DIR, req.params.file);
-
-    if (!fs.existsSync(f)) return res.status(404).send("missing");
-
-    res.setHeader("Content-Type", "audio/mpeg");
-    fs.createReadStream(f).pipe(res);
 });
 
-// ======================================================================
-// MAIN MENU (FIXED # SUPPORT)
-// ======================================================================
-
+// 1. MAIN MENU
 app.all("/twiml", async (req, res) => {
-
-    try {
-
-        const r = new VoiceResponse();
-
-        const g = r.gather({
-            input: "dtmf",
-            finishOnKey: "#",   // 🔥 FIXED: hash works again
-            action: "/router",
-            timeout: 10
-        });
-
-        await say(g, "Press 1 for chat or press hash for music");
-
-        r.redirect("/twiml");
-
-        res.type("text/xml").send(r.toString());
-
-    } catch (e) {
-        console.error("/twiml crash", e.message);
-        res.status(500).send("error");
-    }
+    const caller = req.body.From;
+    if (!CONFIG.VERIFIED_CALLERS.includes(caller)) { const r = new VoiceResponse(); r.reject(); return res.type("text/xml").send(r.toString()); }
+    
+    sessions.delete(req.body.CallSid);
+    const r = new VoiceResponse();
+    
+    const menuTTS = await generateFreeTTS("Hello! Press 1 to chat, or Hash for music. שלום, לחץ 1 לשיחה או סולמית למוזיקה.");
+    const g = r.gather({ input: "dtmf", numDigits: 1, action: "/router", timeout: 10, finishOnKey: "" });
+    if (menuTTS) g.play(`${CONFIG.BASE_URL}/music/${menuTTS}`);
+    else g.say("Press 1 for chat, hash for music."); 
+    
+    r.redirect("/twiml");
+    res.type("text/xml").send(r.toString());
 });
-
-// ======================================================================
-// ROUTER
-// ======================================================================
 
 app.all("/router", (req, res) => {
-
     const r = new VoiceResponse();
-
     const d = req.body.Digits;
 
-    if (d === "1") r.redirect("/voice");
-    else if (d === "#") r.redirect("/music");
+    if (d === "1") r.redirect("/voice-mode");      
+    else if (d === "#") r.redirect("/music-mode"); 
     else r.redirect("/twiml");
-
+    
     res.type("text/xml").send(r.toString());
 });
 
-// ======================================================================
-// CHAT MODE
-// ======================================================================
-
-app.all("/voice", async (req, res) => {
-
-    try {
-
-        const r = new VoiceResponse();
-
-        r.record({
-            action: "/voice-process",
-            finishOnKey: "#",
-            maxLength: 60,
-            playBeep: true
-        });
-
-        await say(r, "Speak now and press hash");
-
-        res.type("text/xml").send(r.toString());
-
-    } catch (e) {
-        console.error("voice crash", e.message);
-        res.status(500).send("error");
-    }
+// 2. VOICE CHAT (Zero-Cost STT)
+app.all("/voice-mode", async (req, res) => {
+    const r = new VoiceResponse();
+    const beepTTS = await generateFreeTTS("דבר אחרי הצפצוף. לסיום לחץ סולמית. Speak after the beep. Press hash to finish.");
+    if (beepTTS) r.play(`${CONFIG.BASE_URL}/music/${beepTTS}`);
+    
+    r.record({ action: "/voice-process", finishOnKey: "#", maxLength: 60, playBeep: true });
+    res.type("text/xml").send(r.toString());
 });
-
-// ======================================================================
-// VOICE PROCESS (FIXED CRASH SAFE)
-// ======================================================================
 
 app.all("/voice-process", async (req, res) => {
-
     const r = new VoiceResponse();
-
-    try {
-
-        const url = req.body.RecordingUrl;
-
-        if (!url) {
-            await say(r, "No recording");
-            r.redirect("/voice");
-            return res.type("text/xml").send(r.toString());
+    
+    if (req.body.RecordingUrl) {
+        const base64Audio = await fetchTwilioRecording(req.body.RecordingUrl);
+        if (base64Audio) {
+            const cleanText = await transcribeAudio(base64Audio);
+            console.log(`[Chat - Transcribed]: ${cleanText}`);
+            
+            if (cleanText) {
+                const replyText = await chatWithGemini(getSession(req.body.CallSid), cleanText);
+                console.log(`[Chat - AI Reply]: ${replyText}`);
+                
+                const ttsFilename = await generateFreeTTS(replyText);
+                if (ttsFilename) r.play(`${CONFIG.BASE_URL}/music/${ttsFilename}`);
+            } else {
+                const errorTts = await generateFreeTTS("לא שמעתי כלום. I didn't hear anything.");
+                if (errorTts) r.play(`${CONFIG.BASE_URL}/music/${errorTts}`);
+            }
         }
-
-        const audio = await fetchTwilioRecording(url);
-
-        if (!audio) {
-            await say(r, "Audio error");
-            r.redirect("/voice");
-            return res.type("text/xml").send(r.toString());
-        }
-
-        const text = await transcribeAudio(audio);
-
-        if (!text) {
-            await say(r, "I did not understand");
-            r.redirect("/voice");
-            return res.type("text/xml").send(r.toString());
-        }
-
-        const reply = text; // (keep simple chat for now)
-
-        await say(r, reply);
-
-        r.redirect("/twiml");
-
-        res.type("text/xml").send(r.toString());
-
-    } catch (e) {
-
-        console.error("VOICE PROCESS CRASH:", e.message);
-
-        await say(r, "Server error");
-
-        r.redirect("/twiml");
-
-        res.type("text/xml").send(r.toString());
     }
-});
-
-// ======================================================================
-// MUSIC
-// ======================================================================
-
-app.all("/music", async (req, res) => {
-
-    const r = new VoiceResponse();
-
-    const g = r.gather({
-        input: "dtmf",
-        finishOnKey: "#",
-        action: "/music-record"
-    });
-
-    await say(g, "Press 1 and say song name");
-
+    
+    const g = r.gather({ input: "dtmf", numDigits: 1, action: "/router", finishOnKey: "" });
+    const loopTTS = await generateFreeTTS("לחץ 1 להמשך שיחה, או סולמית למוזיקה. Press 1 to keep talking, or Hash for music.");
+    if (loopTTS) g.play(`${CONFIG.BASE_URL}/music/${loopTTS}`);
+    
     res.type("text/xml").send(r.toString());
 });
 
-app.all("/music-record", async (req, res) => {
-
+// 3. MUSIC MODE
+app.all("/music-mode", async (req, res) => {
     const r = new VoiceResponse();
-
-    r.record({
-        action: "/music-search",
-        finishOnKey: "#",
-        maxLength: 20,
-        playBeep: true
-    });
-
-    await say(r, "Say song then press hash");
-
+    const menuTTS = await generateFreeTTS("Music mode. Press 1 to search for a song.");
+    const g = r.gather({ input: "dtmf", numDigits: 1, action: "/music-logic", timeout: 10, finishOnKey: "" });
+    if (menuTTS) g.play(`${CONFIG.BASE_URL}/music/${menuTTS}`);
+    
     res.type("text/xml").send(r.toString());
 });
 
-// ======================================================================
-// MUSIC SEARCH (SAFE)
-// ======================================================================
+app.all("/music-logic", async (req, res) => {
+    const r = new VoiceResponse();
+    if (req.body.Digits === "1") {
+        const promptTts = await generateFreeTTS("תגיד את שם השיר אחרי הצפצוף, ולסיום לחץ סולמית. Say the song name, then press Hash.");
+        if (promptTts) r.play(`${CONFIG.BASE_URL}/music/${promptTts}`);
+        
+        r.record({ action: "/music-search", maxLength: 15, playBeep: true, finishOnKey: "#" });
+        return res.type("text/xml").send(r.toString());
+    }
+    r.redirect("/twiml");
+    res.type("text/xml").send(r.toString());
+});
 
 app.all("/music-search", async (req, res) => {
-
     const r = new VoiceResponse();
 
-    try {
+    if (req.body.RecordingUrl) {
+        const base64Audio = await fetchTwilioRecording(req.body.RecordingUrl);
+        if (base64Audio) {
+            const cleanQuery = await transcribeAudio(base64Audio);
+            console.log(`[Music - Searching]: ${cleanQuery}`);
 
-        const audio = await fetchTwilioRecording(req.body.RecordingUrl);
-
-        const text = await transcribeAudio(audio);
-
-        const song = cleanSong(text);
-
-        if (!song) {
-            await say(r, "No song found");
-            r.redirect("/music");
-            return res.type("text/xml").send(r.toString());
+            if (cleanQuery) {
+                searchAndDownloadYTDLP(req.body.CallSid, cleanQuery);
+                const waitTts = await generateFreeTTS(`מחפש את ${cleanQuery}`);
+                if (waitTts) r.play(`${CONFIG.BASE_URL}/music/${waitTts}`);
+                
+                r.redirect("/music-wait-loop");
+                return res.type("text/xml").send(r.toString());
+            }
         }
+    }
+    r.redirect("/music-mode");
+    res.type("text/xml").send(r.toString());
+});
 
-        await say(r, "Searching " + song);
+// 4. MUSIC PLAYER WAIT LOOP
+app.all("/music-wait-loop", async (req, res) => {
+    const r = new VoiceResponse();
+    const dl = downloadQueue.get(req.body.CallSid);
+    
+    if (!dl) { r.redirect("/music-mode"); return res.type("text/xml").send(r.toString()); }
 
-        // fake queue (simplified for stability)
-        downloads.set(req.body.CallSid, {
-            url: null,
-            status: "pending"
-        });
-
+    if (dl.status === 'done') {
+        const playTts = await generateFreeTTS("משמיע כעת. Playing now.");
+        if (playTts) r.play(`${CONFIG.BASE_URL}/music/${playTts}`);
+        
+        // This plays the actual yt-dlp song, and if you press a button it exits
+        const g = r.gather({ input: "dtmf", numDigits: 1, action: "/router", bargeIn: true, finishOnKey: "" });
+        g.play(dl.url);
+        
         r.redirect("/twiml");
 
-        res.type("text/xml").send(r.toString());
-
-    } catch (e) {
-
-        console.error("music crash", e.message);
-
-        await say(r, "Music error");
-
-        res.type("text/xml").send(r.toString());
+    } else if (dl.status === 'error' || Date.now() - dl.startTime > 60000) {
+        const failTts = await generateFreeTTS("שגיאה בהורדת השיר. Error downloading.");
+        if (failTts) r.play(`${CONFIG.BASE_URL}/music/${failTts}`);
+        downloadQueue.delete(req.body.CallSid);
+        r.redirect("/music-mode");
+    } else {
+        r.pause({ length: 3 });
+        r.redirect("/music-wait-loop");
     }
+    res.type("text/xml").send(r.toString());
 });
 
-// ======================================================================
-// SAY WRAPPER
-// ======================================================================
-
-async function say(r, text) {
-
-    try {
-
-        const file = await tts(text);
-
-        if (file) {
-            r.play(`${CONFIG.BASE_URL}/music/${file}`);
-        } else {
-            r.say(text);
-        }
-
-    } catch {
-        r.say(text);
-    }
-}
-
-// ======================================================================
-// START
-// ======================================================================
-
-app.listen(CONFIG.PORT, () => {
-    console.log("Server running:", CONFIG.PORT);
-});
+app.listen(CONFIG.PORT, () => console.log(`🚀 Server Online: PORT ${CONFIG.PORT}`));
