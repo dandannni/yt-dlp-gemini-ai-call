@@ -1,7 +1,7 @@
 {
   "name": "gemini-music-bot",
-  "version": "2.0.0",
-  "description": "Twilio Bot with Resume Functionality",
+  "version": "3.0.0",
+  "description": "Twilio Bot with Zero-Cost Speech & TTS, Hebrew Support, and Music Resuming",
   "main": "server.js",
   "type": "module",
   "scripts": {
