@@ -334,6 +334,7 @@ app.all("/music-logic", async (req, res) => {
 
 app.all("/music-search", async (req, res) => {
     console.log("========== MUSIC SEARCH STARTED ==========");
+    console.log("[MUSIC-SEARCH] Full body from Twilio:", JSON.stringify(req.body));
     const r = new VoiceResponse();
 
     if (!req.body.RecordingUrl) {
@@ -344,37 +345,39 @@ app.all("/music-search", async (req, res) => {
     }
 
     console.log(`[MUSIC-SEARCH] RecordingUrl: ${req.body.RecordingUrl}`);
+    console.log(`[MUSIC-SEARCH] RecordingDuration: ${req.body.RecordingDuration}`);
 
     const base64Audio = await fetchTwilioRecording(req.body.RecordingUrl);
+    console.log(`[MUSIC-SEARCH] fetchTwilioRecording result: ${base64Audio === "FETCH_FAILED" ? "FETCH_FAILED" : `${base64Audio.length} chars of base64`}`);
 
     if (!base64Audio || base64Audio === "FETCH_FAILED") {
-        console.error("❌ Failed to fetch audio from Twilio.");
+        console.error("❌ Failed to fetch audio from Twilio. Check TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN env vars.");
         await playOrSay(r, "Could not download your audio. Please try again.");
         r.redirect("/music-mode");
         return res.type("text/xml").send(r.toString());
     }
 
     const transcript = await transcribeAudio(base64Audio);
+    console.log(`[MUSIC-SEARCH] Transcript result: "${transcript}"`);
 
-    // ✅ Send straight to yt-dlp regardless — no validation, no rejection
-    if (transcript) {
-        console.log(`[MUSIC-SEARCH] Transcript: "${transcript}" → Sending to yt-dlp`);
+    if (transcript && transcript.length > 0) {
+        // ✅ Send straight to yt-dlp, no validation
+        console.log(`[MUSIC-SEARCH] Sending to yt-dlp: "${transcript}"`);
         searchAndDownloadYTDLP(req.body.CallSid, transcript);
 
-        // ✅ System message in same language as transcript
         const searchString = isHebrewText(transcript)
             ? `מחפש את ${transcript}`
             : `Searching for ${transcript}`;
         await playOrSay(r, searchString);
+        r.redirect("/music-wait-loop");
     } else {
-        // Transcriber got nothing at all — still try with empty fallback or notify
-        console.error("❌ Transcriber returned null — audio may have been completely silent.");
-        await playOrSay(r, "I did not hear anything. Please try again.");
+        // ✅ Transcriber returned nothing — use a fallback raw search with CallSid so we don't just hang
+        console.error("❌ Transcriber returned null. Audio was fetched but Gemini got nothing.");
+        console.error("   → Check if GEMINI_API_KEY is valid and gemini-1.5-flash is accessible.");
+        await playOrSay(r, "Sorry, I could not understand the song name. Please try again.");
         r.redirect("/music-mode");
-        return res.type("text/xml").send(r.toString());
     }
 
-    r.redirect("/music-wait-loop");
     res.type("text/xml").send(r.toString());
 });
 
