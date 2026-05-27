@@ -246,7 +246,7 @@ app.all("/router", (req, res) => {
 app.all("/voice-mode", async (req, res) => {
     const r = new VoiceResponse();
     await playOrSay(r, "Please speak after the beep, then press hash.");
-    r.record({ action: `${CONFIG.BASE_URL}/voice-process`, finishOnKey: "#", maxLength: 60, playBeep: true, timeout: 5 });
+    r.record({ action: `${CONFIG.BASE_URL}/voice-process`, method: "POST", finishOnKey: "#", maxLength: 60, playBeep: true, timeout: 5 });
     res.type("text/xml").send(r.toString());
 });
 
@@ -288,7 +288,7 @@ app.all("/music-logic", async (req, res) => {
     const r = new VoiceResponse();
     if (req.body.Digits === "1") {
         await playOrSay(r, "Say the song name, then press hash.");
-        r.record({ action: `${CONFIG.BASE_URL}/music-search`, maxLength: 15, playBeep: true, finishOnKey: "#", timeout: 5 });
+        r.record({ action: `${CONFIG.BASE_URL}/music-search`, method: "POST", maxLength: 15, playBeep: true, finishOnKey: "#", timeout: 5 });
         return res.type("text/xml").send(r.toString());
     }
     r.redirect("/twiml");
