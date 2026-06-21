@@ -1,4 +1,4 @@
-console.log("🚀 Starting Server: GEMINI 2.5 + TWILIO AUTH + ABSOLUTE ROUTING...");
+console.log("🚀 Starting Server: GEMINI 2.5 + LIVE GOOGLE SEARCH + TWILIO AUTH...");
 
 import express from "express";
 import dotenv from "dotenv";
@@ -41,7 +41,7 @@ function isHebrewText(text) {
 }
 
 // ==============================================================================
-// 🧠 GEMINI 2.5 MODELS
+// 🧠 GEMINI 2.5 MODELS (NOW WITH LIVE SEARCH!)
 // ==============================================================================
 
 async function transcribeAudio(base64Audio) {
@@ -78,11 +78,18 @@ async function chatWithGemini(session, userInputText) {
             const genAI = new GoogleGenerativeAI(key);
             const model = genAI.getGenerativeModel({ 
                 model: "gemini-2.5-flash",
-                systemInstruction: "You are a helpful phone assistant. Answer briefly. Never mix English and Hebrew. If Hebrew, reply ONLY in Hebrew. If English, reply ONLY in English."
+                // 🌐 THIS ENABLES LIVE GOOGLE SEARCH
+                tools: [{ googleSearch: {} }],
+                // ⚠️ STRICT RULE ADDED: Do NOT output URLs
+                systemInstruction: "You are a helpful phone assistant with access to real-time Google Search. Answer briefly. Never mix English and Hebrew. If Hebrew, reply ONLY in Hebrew. If English, reply ONLY in English. CRITICAL: Do NOT output any URLs, links, or markdown syntax (like **), because your response will be read out loud over a phone call."
             });
             const chat = model.startChat({ history: session.chatHistory });
             const result = await chat.sendMessage(userInputText);
-            return result.response.text();
+            
+            // Strip any accidental markdown stars just in case, for cleaner text-to-speech
+            const cleanResponse = result.response.text().replace(/\*/g, '');
+            return cleanResponse;
+            
         } catch (e) {
             console.error(`❌ [GEMINI CHAT] Key Failed: ${e.message}`);
         }
@@ -164,13 +171,11 @@ async function searchAndDownloadYTDLP(callSid, query) {
     });
 }
 
-// ⚠️ THE TWILIO AUTH FIX IS HERE
 async function fetchTwilioRecording(recordingUrl) {
     console.log(`[TWILIO] Fetching MP3 with Auth from: ${recordingUrl}.mp3`);
     try {
         await new Promise(resolve => setTimeout(resolve, 500));
         
-        // Construct Twilio Basic Auth Header
         const authHeader = "Basic " + Buffer.from(`${CONFIG.TWILIO_ACCOUNT_SID}:${CONFIG.TWILIO_AUTH_TOKEN}`).toString("base64");
 
         const audioRes = await fetch(recordingUrl + ".mp3", {
@@ -216,7 +221,7 @@ app.all("/twiml", async (req, res) => {
     
     const g = r.gather({ 
         input: "dtmf", numDigits: 1, 
-        action: `${CONFIG.BASE_URL}/router`, // ⚠️ ABSOLUTE URL
+        action: `${CONFIG.BASE_URL}/router`, 
         method: "POST", 
         timeout: 10, finishOnKey: "" 
     });
@@ -235,15 +240,12 @@ app.all("/router", (req, res) => {
     res.type("text/xml").send(r.toString());
 });
 
-// ------------------------------------------------------------------------------
-// VOICE CHAT
-// ------------------------------------------------------------------------------
 app.all("/voice-mode", async (req, res) => {
     const r = new VoiceResponse();
     await playOrSay(r, "Please speak after the beep, then press hash.");
     
     r.record({ 
-        action: `${CONFIG.BASE_URL}/voice-process`, // ⚠️ ABSOLUTE URL
+        action: `${CONFIG.BASE_URL}/voice-process`,
         method: "POST", 
         finishOnKey: "#", maxLength: 60, playBeep: true, timeout: 5 
     });
@@ -280,9 +282,6 @@ app.all("/voice-process", async (req, res) => {
     res.type("text/xml").send(r.toString());
 });
 
-// ------------------------------------------------------------------------------
-// MUSIC MODE
-// ------------------------------------------------------------------------------
 app.all("/music-mode", async (req, res) => {
     const r = new VoiceResponse();
     const g = r.gather({ 
@@ -298,7 +297,7 @@ app.all("/music-logic", async (req, res) => {
     if (req.body.Digits === "1") {
         await playOrSay(r, "Say the song name, then press hash.");
         r.record({ 
-            action: `${CONFIG.BASE_URL}/music-search`, // ⚠️ ABSOLUTE URL
+            action: `${CONFIG.BASE_URL}/music-search`, 
             method: "POST", 
             maxLength: 15, playBeep: true, finishOnKey: "#", timeout: 5 
         });
@@ -343,9 +342,6 @@ app.all("/music-search", async (req, res) => {
     res.type("text/xml").send(r.toString());
 });
 
-// ------------------------------------------------------------------------------
-// MUSIC WAIT LOOP
-// ------------------------------------------------------------------------------
 app.all("/music-wait-loop", async (req, res) => {
     const r = new VoiceResponse();
     const dl = downloadQueue.get(req.body.CallSid);
