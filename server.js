@@ -1,4 +1,4 @@
-console.log("🚀 Starting Server: ASYNC GEMINI SEARCH + WAIT LOOPS...");
+console.log("🚀 Starting Server: GEMINI 2.5 + LIVE SEARCH + SMS TO SPECIFIC PHONE...");
 
 import express from "express";
 import dotenv from "dotenv";
@@ -16,8 +16,7 @@ dotenv.config();
 // ==============================================================================
 const CONFIG = {
     PORT: process.env.PORT || 3000,
-    // Fixed fallback to match your actual Render URL!
-    BASE_URL: process.env.RENDER_EXTERNAL_URL || "https://yt-dlp-gemini-ai-call.onrender.com", 
+    BASE_URL: process.env.RENDER_EXTERNAL_URL || "https://gpt-phone-call.onrender.com", 
     DOWNLOAD_DIR: "/tmp",
     
     TWILIO_ACCOUNT_SID: process.env.TWILIO_ACCOUNT_SID,
@@ -34,6 +33,9 @@ const CONFIG = {
     ].filter(key => key)
 };
 
+// Initialize Twilio Client for sending SMS
+const twilioClient = twilio(CONFIG.TWILIO_ACCOUNT_SID, CONFIG.TWILIO_AUTH_TOKEN);
+
 if (!fs.existsSync(CONFIG.DOWNLOAD_DIR)) fs.mkdirSync(CONFIG.DOWNLOAD_DIR);
 
 function isHebrewText(text) {
@@ -41,28 +43,19 @@ function isHebrewText(text) {
 }
 
 // ==============================================================================
-// 🧠 GEMINI 2.5 MODELS (WITH SEARCH)
+// 🧠 GEMINI 2.5 MODELS
 // ==============================================================================
 
 async function transcribeAudio(base64Audio) {
     if (CONFIG.GEMINI_KEYS.length === 0) return null;
-
-    console.log(`[GEMINI] Sending audio to Google Gemini 2.5 Flash...`);
     const prompt = `You are a strict transcriber. Listen to the audio and extract the exact text spoken. It can be Hebrew or English. Remove hesitations. Output ONLY the clean text. If the audio is silent or unintelligible, output the word "SILENCE". Do not add ANY conversational text.`;
 
     for (const key of CONFIG.GEMINI_KEYS) {
         try {
             const genAI = new GoogleGenerativeAI(key);
             const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" }); 
-            
-            const result = await model.generateContent([
-                prompt, 
-                { inlineData: { mimeType: "audio/mp3", data: base64Audio } }
-            ]);
-            
+            const result = await model.generateContent([ prompt, { inlineData: { mimeType: "audio/mp3", data: base64Audio } } ]);
             const text = result.response.text().trim();
-            console.log(`[GEMINI] Successful Transcript: "${text}"`);
-            
             if (text.includes("SILENCE") || text.length < 2 || text.includes("I can help")) return null;
             return text;
         } catch (e) {
@@ -78,7 +71,7 @@ async function chatWithGemini(session, userInputText) {
             const genAI = new GoogleGenerativeAI(key);
             const model = genAI.getGenerativeModel({ 
                 model: "gemini-2.5-flash",
-                tools: [{ googleSearch: {} }], // Live Google Search enabled
+                tools: [{ googleSearch: {} }],
                 systemInstruction: "You are a helpful phone assistant with access to real-time Google Search. Answer briefly. Never mix English and Hebrew. If Hebrew, reply ONLY in Hebrew. If English, reply ONLY in English. CRITICAL: Do NOT output any URLs, links, or markdown syntax (like **), because your response will be read out loud over a phone call."
             });
             const chat = model.startChat({ history: session.chatHistory });
@@ -92,7 +85,7 @@ async function chatWithGemini(session, userInputText) {
 }
 
 // ==============================================================================
-// 🔊 ZERO-COST TEXT-TO-SPEECH
+// 🔊 ZERO-COST TEXT-TO-SPEECH 
 // ==============================================================================
 async function generateFreeTTS(text) {
     return new Promise((resolve) => {
@@ -103,7 +96,6 @@ async function generateFreeTTS(text) {
         const safeText = text.replace(/["'\n]/g, ' ').trim();
         if (!safeText) return resolve(null);
         
-        console.log(`[TTS] Generating audio for: "${safeText}"`);
         const voice = isHebrewText(safeText) ? 'he-IL-AvriNeural' : 'en-US-ChristopherNeural';
         const child = spawn('edge-tts',['--text', safeText, '--voice', voice, '--write-media', outputPath]);
         
@@ -111,20 +103,15 @@ async function generateFreeTTS(text) {
             if (code === 0 && fs.existsSync(outputPath)) {
                 setTimeout(() => { if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath) }, 300000);
                 resolve(filename);
-            } else {
-                resolve(null);
-            }
+            } else { resolve(null); }
         });
     });
 }
 
 async function playOrSay(r, text) {
     const ttsFilename = await generateFreeTTS(text);
-    if (ttsFilename) {
-        r.play(`${CONFIG.BASE_URL}/music/${ttsFilename}`);
-    } else {
-        r.say({ language: isHebrewText(text) ? 'he-IL' : 'en-US' }, text);
-    }
+    if (ttsFilename) r.play(`${CONFIG.BASE_URL}/music/${ttsFilename}`);
+    else r.say({ language: isHebrewText(text) ? 'he-IL' : 'en-US' }, text);
 }
 
 // ==============================================================================
@@ -132,23 +119,26 @@ async function playOrSay(r, text) {
 // ==============================================================================
 const sessions = new Map();
 const downloadQueue = new Map();
-const chatQueue = new Map(); // ⚠️ NEW: Queue for long Gemini Searches
+const chatQueue = new Map();
 
 function getSession(callSid) {
     if (!sessions.has(callSid)) {
-        sessions.set(callSid, { chatHistory:[], currentSong: null, mode: "normal" });
+        sessions.set(callSid, { chatHistory:[], currentSong: null, mode: "normal", lastAIResponse: "" });
     }
     return sessions.get(callSid);
 }
 
-// ⚠️ NEW: Runs the slow Gemini Search in the background!
 async function processChatBackground(callSid, recordingUrl) {
     try {
         const base64Audio = await fetchTwilioRecording(recordingUrl);
         if (base64Audio && base64Audio !== "FETCH_FAILED") {
             const cleanText = await transcribeAudio(base64Audio);
             if (cleanText) {
-                const replyText = await chatWithGemini(getSession(callSid), cleanText);
+                const session = getSession(callSid);
+                const replyText = await chatWithGemini(session, cleanText);
+                
+                session.lastAIResponse = replyText; 
+
                 const ttsFilename = await generateFreeTTS(replyText);
                 chatQueue.set(callSid, { status: 'done', ttsFilename, replyText });
             } else {
@@ -191,9 +181,7 @@ async function fetchTwilioRecording(recordingUrl) {
         if (!audioRes.ok) return "FETCH_FAILED";
         const arrayBuffer = await audioRes.arrayBuffer();
         return Buffer.from(arrayBuffer).toString('base64');
-    } catch (e) {
-        return "FETCH_FAILED";
-    }
+    } catch (e) { return "FETCH_FAILED"; }
 }
 
 // ==============================================================================
@@ -234,7 +222,40 @@ app.all("/router", (req, res) => {
 });
 
 // ------------------------------------------------------------------------------
-// ASYNC VOICE CHAT (Fixes 15-second Timeout)
+// 📱 SMS & CHAT ROUTER
+// ------------------------------------------------------------------------------
+app.all("/sms-router", async (req, res) => {
+    const r = new VoiceResponse();
+    const d = req.body.Digits;
+    const session = getSession(req.body.CallSid);
+
+    if (d === "*") { 
+        const textToSend = session.lastAIResponse || "No previous message found to send.";
+        const targetPhoneNumber = "+972548498889"; // ⚠️ Hardcoded Destination
+        
+        try {
+            console.log(`[SMS] Sending message to ${targetPhoneNumber}...`);
+            await twilioClient.messages.create({
+                body: `🤖 Gemini AI:\n\n${textToSend}`,
+                from: req.body.To,         // Your Twilio Phone Number
+                to: targetPhoneNumber      // Hardcoded Phone Number
+            });
+            await playOrSay(r, "Message sent to the designated phone successfully.");
+        } catch (error) {
+            console.error(`❌ [SMS ERROR]:`, error.message);
+            await playOrSay(r, "Failed to send the message to the designated phone.");
+        }
+        r.redirect(`${CONFIG.BASE_URL}/voice-mode`); 
+    } 
+    else if (d === "1") r.redirect(`${CONFIG.BASE_URL}/voice-mode`);
+    else if (d === "#") r.redirect(`${CONFIG.BASE_URL}/music-mode`);
+    else r.redirect(`${CONFIG.BASE_URL}/twiml`);
+    
+    res.type("text/xml").send(r.toString());
+});
+
+// ------------------------------------------------------------------------------
+// ASYNC VOICE CHAT
 // ------------------------------------------------------------------------------
 app.all("/voice-mode", async (req, res) => {
     const r = new VoiceResponse();
@@ -245,21 +266,17 @@ app.all("/voice-mode", async (req, res) => {
 
 app.all("/voice-process", async (req, res) => {
     const r = new VoiceResponse();
-    
     if (!req.body.RecordingUrl) {
         await playOrSay(r, "No audio received from Twilio.");
         r.redirect(`${CONFIG.BASE_URL}/voice-mode`);
         return res.type("text/xml").send(r.toString());
     }
 
-    // 1. Send the heavy task to the background
     chatQueue.set(req.body.CallSid, { status: 'pending' });
     processChatBackground(req.body.CallSid, req.body.RecordingUrl);
 
-    // 2. Respond to Twilio INSTANTLY to bypass 15s limit
     r.say({ language: 'en-US' }, "Let me look that up..."); 
     r.redirect(`${CONFIG.BASE_URL}/chat-wait-loop`);
-    
     res.type("text/xml").send(r.toString());
 });
 
@@ -270,14 +287,12 @@ app.all("/chat-wait-loop", async (req, res) => {
     if (!task) { r.redirect(`${CONFIG.BASE_URL}/voice-mode`); return res.type("text/xml").send(r.toString()); }
 
     if (task.status === 'done') {
-        if (task.ttsFilename) {
-            r.play(`${CONFIG.BASE_URL}/music/${task.ttsFilename}`);
-        } else {
-            r.say({ language: isHebrewText(task.replyText) ? 'he-IL' : 'en-US' }, task.replyText);
-        }
+        const g1 = r.gather({ input: "dtmf", numDigits: 1, action: `${CONFIG.BASE_URL}/sms-router`, method: "POST", bargeIn: true, finishOnKey: "" });
+        if (task.ttsFilename) g1.play(`${CONFIG.BASE_URL}/music/${task.ttsFilename}`);
+        else g1.say({ language: isHebrewText(task.replyText) ? 'he-IL' : 'en-US' }, task.replyText);
         
-        const g = r.gather({ input: "dtmf", numDigits: 1, action: `${CONFIG.BASE_URL}/router`, method: "POST", finishOnKey: "" });
-        await playOrSay(g, "Press 1 to speak again, or hash for music.");
+        const g2 = r.gather({ input: "dtmf", numDigits: 1, action: `${CONFIG.BASE_URL}/sms-router`, method: "POST", finishOnKey: "" });
+        await playOrSay(g2, "Press 1 to reply, Star to text this to your phone, or Hash for music.");
         
         chatQueue.delete(req.body.CallSid);
         r.redirect(`${CONFIG.BASE_URL}/twiml`);
@@ -286,9 +301,7 @@ app.all("/chat-wait-loop", async (req, res) => {
         await playOrSay(r, task.message);
         chatQueue.delete(req.body.CallSid);
         r.redirect(`${CONFIG.BASE_URL}/voice-mode`);
-
     } else {
-        // Still searching Google... wait 3 more seconds.
         r.pause({ length: 3 });
         r.redirect(`${CONFIG.BASE_URL}/chat-wait-loop`);
     }
