@@ -1,4 +1,4 @@
-console.log("🚀 Starting Server: GEMINI 2.5 + LIVE GOOGLE SEARCH + TWILIO AUTH...");
+console.log("🚀 Starting Server: ASYNC GEMINI SEARCH + WAIT LOOPS...");
 
 import express from "express";
 import dotenv from "dotenv";
@@ -16,10 +16,10 @@ dotenv.config();
 // ==============================================================================
 const CONFIG = {
     PORT: process.env.PORT || 3000,
-    BASE_URL: process.env.RENDER_EXTERNAL_URL || "https://gpt-phone-call.onrender.com", 
+    // Fixed fallback to match your actual Render URL!
+    BASE_URL: process.env.RENDER_EXTERNAL_URL || "https://yt-dlp-gemini-ai-call.onrender.com", 
     DOWNLOAD_DIR: "/tmp",
     
-    // ⚠️ CRITICAL: Twilio Auth for downloading recordings
     TWILIO_ACCOUNT_SID: process.env.TWILIO_ACCOUNT_SID,
     TWILIO_AUTH_TOKEN: process.env.TWILIO_AUTH_TOKEN,
 
@@ -41,7 +41,7 @@ function isHebrewText(text) {
 }
 
 // ==============================================================================
-// 🧠 GEMINI 2.5 MODELS (NOW WITH LIVE SEARCH!)
+// 🧠 GEMINI 2.5 MODELS (WITH SEARCH)
 // ==============================================================================
 
 async function transcribeAudio(base64Audio) {
@@ -78,18 +78,12 @@ async function chatWithGemini(session, userInputText) {
             const genAI = new GoogleGenerativeAI(key);
             const model = genAI.getGenerativeModel({ 
                 model: "gemini-2.5-flash",
-                // 🌐 THIS ENABLES LIVE GOOGLE SEARCH
-                tools: [{ googleSearch: {} }],
-                // ⚠️ STRICT RULE ADDED: Do NOT output URLs
+                tools: [{ googleSearch: {} }], // Live Google Search enabled
                 systemInstruction: "You are a helpful phone assistant with access to real-time Google Search. Answer briefly. Never mix English and Hebrew. If Hebrew, reply ONLY in Hebrew. If English, reply ONLY in English. CRITICAL: Do NOT output any URLs, links, or markdown syntax (like **), because your response will be read out loud over a phone call."
             });
             const chat = model.startChat({ history: session.chatHistory });
             const result = await chat.sendMessage(userInputText);
-            
-            // Strip any accidental markdown stars just in case, for cleaner text-to-speech
-            const cleanResponse = result.response.text().replace(/\*/g, '');
-            return cleanResponse;
-            
+            return result.response.text().replace(/\*/g, '');
         } catch (e) {
             console.error(`❌ [GEMINI CHAT] Key Failed: ${e.message}`);
         }
@@ -98,7 +92,7 @@ async function chatWithGemini(session, userInputText) {
 }
 
 // ==============================================================================
-// 🔊 ZERO-COST TEXT-TO-SPEECH (Edge-TTS)
+// 🔊 ZERO-COST TEXT-TO-SPEECH
 // ==============================================================================
 async function generateFreeTTS(text) {
     return new Promise((resolve) => {
@@ -118,7 +112,6 @@ async function generateFreeTTS(text) {
                 setTimeout(() => { if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath) }, 300000);
                 resolve(filename);
             } else {
-                console.error(`❌ [TTS] Failed to generate audio for text: ${safeText}`);
                 resolve(null);
             }
         });
@@ -130,16 +123,16 @@ async function playOrSay(r, text) {
     if (ttsFilename) {
         r.play(`${CONFIG.BASE_URL}/music/${ttsFilename}`);
     } else {
-        console.log(`[TWILIO FALLBACK] Saying: "${text}"`);
         r.say({ language: isHebrewText(text) ? 'he-IL' : 'en-US' }, text);
     }
 }
 
 // ==============================================================================
-// 💾 SESSION & DOWNLOAD LOGIC
+// 💾 SESSION & ASYNC QUEUES
 // ==============================================================================
 const sessions = new Map();
 const downloadQueue = new Map();
+const chatQueue = new Map(); // ⚠️ NEW: Queue for long Gemini Searches
 
 function getSession(callSid) {
     if (!sessions.has(callSid)) {
@@ -148,12 +141,32 @@ function getSession(callSid) {
     return sessions.get(callSid);
 }
 
+// ⚠️ NEW: Runs the slow Gemini Search in the background!
+async function processChatBackground(callSid, recordingUrl) {
+    try {
+        const base64Audio = await fetchTwilioRecording(recordingUrl);
+        if (base64Audio && base64Audio !== "FETCH_FAILED") {
+            const cleanText = await transcribeAudio(base64Audio);
+            if (cleanText) {
+                const replyText = await chatWithGemini(getSession(callSid), cleanText);
+                const ttsFilename = await generateFreeTTS(replyText);
+                chatQueue.set(callSid, { status: 'done', ttsFilename, replyText });
+            } else {
+                chatQueue.set(callSid, { status: 'error', message: "I couldn't understand the audio." });
+            }
+        } else {
+            chatQueue.set(callSid, { status: 'error', message: "Error fetching audio from Twilio." });
+        }
+    } catch (e) {
+        console.error("Background Chat Error:", e);
+        chatQueue.set(callSid, { status: 'error', message: "An error occurred while searching." });
+    }
+}
+
 async function searchAndDownloadYTDLP(callSid, query) {
     downloadQueue.set(callSid, { status: 'pending', startTime: Date.now() });
-    console.log(`[YTDLP] Starting download for: "${query}"`);
     const id = uuidv4();
     const outputTemplate = path.join(CONFIG.DOWNLOAD_DIR, `${id}.%(ext)s`);
-    
     const args =[`scsearch1:${query}`, '-x', '--audio-format', 'mp3', '--postprocessor-args', 'ffmpeg:-ac 1 -ar 16000', '--no-playlist', '--force-ipv4', '-o', outputTemplate];
     
     const child = spawn('yt-dlp', args);
@@ -161,43 +174,30 @@ async function searchAndDownloadYTDLP(callSid, query) {
         const files = fs.readdirSync(CONFIG.DOWNLOAD_DIR);
         const found = files.find(f => f.startsWith(id) && f.endsWith('.mp3'));
         if (found) {
-            console.log(`[YTDLP] Download Success! File: ${found}`);
             downloadQueue.set(callSid, { status: 'done', url: `${CONFIG.BASE_URL}/music/${found}`, title: query, filename: found });
             setTimeout(() => { if (fs.existsSync(path.join(CONFIG.DOWNLOAD_DIR, found))) fs.unlinkSync(path.join(CONFIG.DOWNLOAD_DIR, found)); }, 1200000);
         } else {
-            console.error(`❌ [YTDLP] Failed to download: "${query}"`);
             downloadQueue.set(callSid, { status: 'error' });
         }
     });
 }
 
 async function fetchTwilioRecording(recordingUrl) {
-    console.log(`[TWILIO] Fetching MP3 with Auth from: ${recordingUrl}.mp3`);
     try {
         await new Promise(resolve => setTimeout(resolve, 500));
-        
         const authHeader = "Basic " + Buffer.from(`${CONFIG.TWILIO_ACCOUNT_SID}:${CONFIG.TWILIO_AUTH_TOKEN}`).toString("base64");
-
-        const audioRes = await fetch(recordingUrl + ".mp3", {
-            headers: { "Authorization": authHeader }
-        });
+        const audioRes = await fetch(recordingUrl + ".mp3", { headers: { "Authorization": authHeader } });
         
-        if (!audioRes.ok) {
-            console.error(`❌ [TWILIO] HTTP Status ${audioRes.status}`);
-            return "FETCH_FAILED";
-        }
-
+        if (!audioRes.ok) return "FETCH_FAILED";
         const arrayBuffer = await audioRes.arrayBuffer();
-        console.log(`[TWILIO] Successfully downloaded ${arrayBuffer.byteLength} bytes.`);
         return Buffer.from(arrayBuffer).toString('base64');
     } catch (e) {
-        console.error(`❌ [TWILIO] Network Fetch Error: ${e.message}`);
         return "FETCH_FAILED";
     }
 }
 
 // ==============================================================================
-// 🚀 ROUTING & EXPRESS SERVER
+// 🚀 ROUTING
 // ==============================================================================
 const app = express();
 app.use(express.urlencoded({ extended: false }));
@@ -218,15 +218,8 @@ app.all("/twiml", async (req, res) => {
     
     sessions.delete(req.body.CallSid);
     const r = new VoiceResponse();
-    
-    const g = r.gather({ 
-        input: "dtmf", numDigits: 1, 
-        action: `${CONFIG.BASE_URL}/router`, 
-        method: "POST", 
-        timeout: 10, finishOnKey: "" 
-    });
+    const g = r.gather({ input: "dtmf", numDigits: 1, action: `${CONFIG.BASE_URL}/router`, method: "POST", timeout: 10, finishOnKey: "" });
     await playOrSay(g, "Main menu. Press 1 for chat, or hash for music.");
-    
     r.redirect(`${CONFIG.BASE_URL}/twiml`);
     res.type("text/xml").send(r.toString());
 });
@@ -240,15 +233,13 @@ app.all("/router", (req, res) => {
     res.type("text/xml").send(r.toString());
 });
 
+// ------------------------------------------------------------------------------
+// ASYNC VOICE CHAT (Fixes 15-second Timeout)
+// ------------------------------------------------------------------------------
 app.all("/voice-mode", async (req, res) => {
     const r = new VoiceResponse();
     await playOrSay(r, "Please speak after the beep, then press hash.");
-    
-    r.record({ 
-        action: `${CONFIG.BASE_URL}/voice-process`,
-        method: "POST", 
-        finishOnKey: "#", maxLength: 60, playBeep: true, timeout: 5 
-    });
+    r.record({ action: `${CONFIG.BASE_URL}/voice-process`, method: "POST", finishOnKey: "#", maxLength: 60, playBeep: true, timeout: 5 });
     res.type("text/xml").send(r.toString());
 });
 
@@ -261,33 +252,55 @@ app.all("/voice-process", async (req, res) => {
         return res.type("text/xml").send(r.toString());
     }
 
-    const base64Audio = await fetchTwilioRecording(req.body.RecordingUrl);
-    if (base64Audio && base64Audio !== "FETCH_FAILED") {
-        const cleanText = await transcribeAudio(base64Audio);
-        if (cleanText) {
-            const replyText = await chatWithGemini(getSession(req.body.CallSid), cleanText);
-            await playOrSay(r, replyText);
-        } else {
-            await playOrSay(r, "I couldn't understand the audio. Please speak clearly.");
-        }
-    } else {
-        await playOrSay(r, "Error fetching audio from Twilio.");
-    }
+    // 1. Send the heavy task to the background
+    chatQueue.set(req.body.CallSid, { status: 'pending' });
+    processChatBackground(req.body.CallSid, req.body.RecordingUrl);
 
-    const g = r.gather({ 
-        input: "dtmf", numDigits: 1, 
-        action: `${CONFIG.BASE_URL}/router`, method: "POST", finishOnKey: "" 
-    });
-    await playOrSay(g, "Press 1 to speak again, or hash for music.");
+    // 2. Respond to Twilio INSTANTLY to bypass 15s limit
+    r.say({ language: 'en-US' }, "Let me look that up..."); 
+    r.redirect(`${CONFIG.BASE_URL}/chat-wait-loop`);
+    
     res.type("text/xml").send(r.toString());
 });
 
+app.all("/chat-wait-loop", async (req, res) => {
+    const r = new VoiceResponse();
+    const task = chatQueue.get(req.body.CallSid);
+    
+    if (!task) { r.redirect(`${CONFIG.BASE_URL}/voice-mode`); return res.type("text/xml").send(r.toString()); }
+
+    if (task.status === 'done') {
+        if (task.ttsFilename) {
+            r.play(`${CONFIG.BASE_URL}/music/${task.ttsFilename}`);
+        } else {
+            r.say({ language: isHebrewText(task.replyText) ? 'he-IL' : 'en-US' }, task.replyText);
+        }
+        
+        const g = r.gather({ input: "dtmf", numDigits: 1, action: `${CONFIG.BASE_URL}/router`, method: "POST", finishOnKey: "" });
+        await playOrSay(g, "Press 1 to speak again, or hash for music.");
+        
+        chatQueue.delete(req.body.CallSid);
+        r.redirect(`${CONFIG.BASE_URL}/twiml`);
+
+    } else if (task.status === 'error') {
+        await playOrSay(r, task.message);
+        chatQueue.delete(req.body.CallSid);
+        r.redirect(`${CONFIG.BASE_URL}/voice-mode`);
+
+    } else {
+        // Still searching Google... wait 3 more seconds.
+        r.pause({ length: 3 });
+        r.redirect(`${CONFIG.BASE_URL}/chat-wait-loop`);
+    }
+    res.type("text/xml").send(r.toString());
+});
+
+// ------------------------------------------------------------------------------
+// MUSIC MODE
+// ------------------------------------------------------------------------------
 app.all("/music-mode", async (req, res) => {
     const r = new VoiceResponse();
-    const g = r.gather({ 
-        input: "dtmf", numDigits: 1, 
-        action: `${CONFIG.BASE_URL}/music-logic`, method: "POST", timeout: 10, finishOnKey: "" 
-    });
+    const g = r.gather({ input: "dtmf", numDigits: 1, action: `${CONFIG.BASE_URL}/music-logic`, method: "POST", timeout: 10, finishOnKey: "" });
     await playOrSay(g, "Music mode. Press 1 to search for a song.");
     res.type("text/xml").send(r.toString());
 });
@@ -296,11 +309,7 @@ app.all("/music-logic", async (req, res) => {
     const r = new VoiceResponse();
     if (req.body.Digits === "1") {
         await playOrSay(r, "Say the song name, then press hash.");
-        r.record({ 
-            action: `${CONFIG.BASE_URL}/music-search`, 
-            method: "POST", 
-            maxLength: 15, playBeep: true, finishOnKey: "#", timeout: 5 
-        });
+        r.record({ action: `${CONFIG.BASE_URL}/music-search`, method: "POST", maxLength: 15, playBeep: true, finishOnKey: "#", timeout: 5 });
         return res.type("text/xml").send(r.toString());
     }
     r.redirect(`${CONFIG.BASE_URL}/twiml`);
@@ -308,12 +317,9 @@ app.all("/music-logic", async (req, res) => {
 });
 
 app.all("/music-search", async (req, res) => {
-    console.log("========== MUSIC SEARCH STARTED ==========");
     const r = new VoiceResponse();
-
     if (!req.body.RecordingUrl) {
-        console.error("❌ ERROR: Twilio did not send a RecordingUrl!");
-        await playOrSay(r, "No audio was recorded. Make sure to speak after the beep.");
+        await playOrSay(r, "No audio was recorded.");
         r.redirect(`${CONFIG.BASE_URL}/music-mode`);
         return res.type("text/xml").send(r.toString());
     }
@@ -322,7 +328,6 @@ app.all("/music-search", async (req, res) => {
     if (base64Audio && base64Audio !== "FETCH_FAILED") {
         const cleanQuery = await transcribeAudio(base64Audio);
         if (!cleanQuery) {
-            console.error("❌ ERROR: Gemini returned null for transcript!");
             await playOrSay(r, "I could not understand the song name. Let's try again.");
             r.redirect(`${CONFIG.BASE_URL}/music-mode`);
             return res.type("text/xml").send(r.toString());
@@ -335,9 +340,7 @@ app.all("/music-search", async (req, res) => {
         r.redirect(`${CONFIG.BASE_URL}/music-wait-loop`);
         return res.type("text/xml").send(r.toString());
     }
-
-    console.error("❌ ERROR: Fetch completely failed.");
-    await playOrSay(r, "There was a network error fetching your audio. Please try again.");
+    await playOrSay(r, "Network error fetching your audio.");
     r.redirect(`${CONFIG.BASE_URL}/music-mode`);
     res.type("text/xml").send(r.toString());
 });
@@ -349,10 +352,7 @@ app.all("/music-wait-loop", async (req, res) => {
     if (!dl) { r.redirect(`${CONFIG.BASE_URL}/music-mode`); return res.type("text/xml").send(r.toString()); }
 
     if (dl.status === 'done') {
-        const g = r.gather({ 
-            input: "dtmf", numDigits: 1, 
-            action: `${CONFIG.BASE_URL}/router`, method: "POST", bargeIn: true, finishOnKey: "" 
-        });
+        const g = r.gather({ input: "dtmf", numDigits: 1, action: `${CONFIG.BASE_URL}/router`, method: "POST", bargeIn: true, finishOnKey: "" });
         g.play(dl.url);
         r.redirect(`${CONFIG.BASE_URL}/twiml`);
 
