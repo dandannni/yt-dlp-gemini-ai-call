@@ -1,8 +1,8 @@
 FROM node:20-slim
 
-# Install system dependencies: Python, pip, FFmpeg
+# Install system dependencies: Python, pip, FFmpeg, curl, AND build-essential for the SQLite Database
 RUN apt-get update && \
-    apt-get install -y python3 python3-pip ffmpeg curl && \
+    apt-get install -y python3 python3-pip ffmpeg curl build-essential && \
     apt-get clean
 
 # Install free Edge TTS for zero-cost Text-to-Speech globally
