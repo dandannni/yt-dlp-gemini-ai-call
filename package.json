@@ -1,7 +1,7 @@
 {
   "name": "gemini-music-bot",
-  "version": "4.0.0",
-  "description": "Twilio Bot with Gemini Search, Music, and Zero-Cost TTS",
+  "version": "5.0.0",
+  "description": "Twilio Bot with Gemini 2.5 Pro Search, Music, and Zero-Cost TTS",
   "main": "server.js",
   "type": "module",
   "scripts": {
@@ -11,7 +11,7 @@
     "express": "^4.18.2",
     "twilio": "^4.19.0",
     "dotenv": "^16.3.1",
-    "@google/generative-ai": "^0.21.0",
+    "@google/generative-ai": "^0.24.1",
     "uuid": "^9.0.1"
   },
   "engines": {
