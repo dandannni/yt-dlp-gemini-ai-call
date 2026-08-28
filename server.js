@@ -1,4 +1,4 @@
-console.log("🚀 Starting Server: GEMINI PRO + JSON MEMORY + HISTORY MENU...");
+console.log("🚀 Starting Server: FAST FLASH AI + SMART ROUTING + FIXED LIKES...");
 
 import express from "express";
 import dotenv from "dotenv";
@@ -12,7 +12,7 @@ import { v4 as uuidv4 } from "uuid";
 dotenv.config();
 
 // ==============================================================================
-// 💾 DATABASE INITIALIZATION (NATIVE JSON - NO C++ COMPILING REQUIRED)
+// 💾 DATABASE INITIALIZATION (JSON MEMORY)
 // ==============================================================================
 const DB_FILE = 'bot_database.json';
 
@@ -60,6 +60,7 @@ function saveLikedSong(phone, songQuery) {
     if (!db.likes[phone].some(item => item.song_query === songQuery)) {
         db.likes[phone].push({ song_query: songQuery });
         writeDB(db);
+        console.log(`✅ [DB] Saved liked song: ${songQuery} for ${phone}`);
     }
 }
 
@@ -102,13 +103,13 @@ async function analyzeAudioIntent(base64Audio) {
                             type: "OBJECT",
                             properties: {
                                 intent: { type: "STRING", description: "Either 'music' or 'chat'" },
-                                query: { type: "STRING", description: "Exact text of the question or song name. MUST remain in the exact original language spoken (Hebrew or English). Do not translate." }
+                                query: { type: "STRING", description: "The song name or chat question." }
                             },
                             required: ["intent", "query"]
                         }
                     }]
                 }],
-                systemInstruction: "You are a fast voice routing engine. Listen to the audio. If the user asks for a song, output intent 'music' and extract the exact song name in the language spoken. If they ask a question, output intent 'chat' and extract the exact text."
+                systemInstruction: "You are a smart voice routing engine. Listen to the audio. If the user asks for a song, figure out the ACTUAL song name and artist they mean (correcting slang or mispronunciations) and output intent 'music' and the corrected song name in the language they used. If they ask a question, output intent 'chat' and extract the exact text of their question."
             }); 
             const result = await model.generateContent([{ inlineData: { mimeType: "audio/mp3", data: base64Audio } }]);
             const call = result.response.functionCalls()?.[0];
@@ -122,16 +123,17 @@ async function chatWithGemini(userInputText) {
     for (const key of CONFIG.GEMINI_KEYS) {
         try {
             const genAI = new GoogleGenerativeAI(key);
+            // Reverted to FLASH for stability and speed. Pro fails frequently on free tier tools.
             const model = genAI.getGenerativeModel({ 
-                model: "gemini-2.5-pro",
+                model: "gemini-2.5-flash",
                 tools: [{ googleSearch: {} }],
-                systemInstruction: "You are a highly intelligent phone assistant with access to Google Search. Conduct deep research to find accurate answers. Synthesize your findings into a natural, conversational response. Keep it concise enough for a phone call (3-4 sentences). Never output URLs or markdown. Respond strictly in the language the user asked in."
+                systemInstruction: "You are a highly intelligent phone assistant with access to Google Search. Conduct research to find accurate answers. Synthesize your findings into a natural, conversational response. Keep it concise enough for a phone call (2-3 sentences). Never output URLs or markdown. Respond strictly in the language the user asked in."
             });
             const result = await model.generateContent(userInputText);
             return result.response.text().replace(/\*/g, '');
         } catch (e) { console.error(`❌ [CHAT] Key Failed: ${e.message}`); }
     }
-    return "Sorry, I had a problem looking that up.";
+    return "Sorry, I had a problem looking that up right now.";
 }
 
 // ==============================================================================
@@ -178,11 +180,12 @@ async function fetchTwilioRecording(recordingUrl) {
 }
 
 async function searchAndDownloadYTDLP(callSid, query) {
-    downloadQueue.set(callSid, { status: 'pending', startTime: Date.now() });
+    // FIX: Ensure 'query' is stored during the pending phase so the Like button can find it later
+    downloadQueue.set(callSid, { status: 'pending', startTime: Date.now(), query: query });
+    
     const id = uuidv4();
     const outputTemplate = path.join(CONFIG.DOWNLOAD_DIR, `${id}.%(ext)s`);
     
-    // Ignore long DJ sets for faster downloads
     const args = [`scsearch1:${query}`, '-x', '--audio-format', 'mp3', '--match-filter', 'duration < 600', '--postprocessor-args', 'ffmpeg:-ac 1 -ar 16000', '--no-playlist', '--force-ipv4', '-o', outputTemplate];
     
     const child = spawn('yt-dlp', args);
@@ -190,9 +193,12 @@ async function searchAndDownloadYTDLP(callSid, query) {
         const files = fs.readdirSync(CONFIG.DOWNLOAD_DIR);
         const found = files.find(f => f.startsWith(id) && f.endsWith('.mp3'));
         if (found) {
-            downloadQueue.set(callSid, { status: 'done', url: `${CONFIG.BASE_URL}/music/${found}`, title: query });
+            // FIX: Keep the query data intact when transitioning to 'done' status
+            downloadQueue.set(callSid, { status: 'done', url: `${CONFIG.BASE_URL}/music/${found}`, query: query });
             setTimeout(() => { if (fs.existsSync(path.join(CONFIG.DOWNLOAD_DIR, found))) fs.unlinkSync(path.join(CONFIG.DOWNLOAD_DIR, found)); }, 1200000);
-        } else { downloadQueue.set(callSid, { status: 'error' }); }
+        } else { 
+            downloadQueue.set(callSid, { status: 'error', query: query }); 
+        }
     });
 }
 
@@ -204,6 +210,9 @@ app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 const VoiceResponse = twilio.twiml.VoiceResponse;
 
+// Keeps the app awake if you hit this URL via UptimeRobot
+app.get("/", (req, res) => res.send("Bot is awake!"));
+
 app.get("/music/:filename", (req, res) => {
     const f = path.resolve(CONFIG.DOWNLOAD_DIR, req.params.filename);
     if (fs.existsSync(f)) {
@@ -212,7 +221,7 @@ app.get("/music/:filename", (req, res) => {
     } else res.status(404).send("File Gone");
 });
 
-// 1. HYBRID ENTRY MENU (Press 0 or Speak)
+// 1. HYBRID ENTRY MENU
 app.all("/twiml", async (req, res) => {
     const caller = req.body.From;
     if (!CONFIG.VERIFIED_CALLERS.includes(caller)) { const r = new VoiceResponse(); r.reject(); return res.type("text/xml").send(r.toString()); }
@@ -221,7 +230,6 @@ app.all("/twiml", async (req, res) => {
     const g = r.gather({ input: "dtmf", numDigits: 1, action: `${CONFIG.BASE_URL}/zero-menu-router`, method: "POST", timeout: 3 });
     await playOrSay(g, "Welcome. Press zero for your history, or wait for the beep to ask a question or request a song.");
     
-    // If they don't press 0, fall through to recording
     r.record({ action: `${CONFIG.BASE_URL}/process-intent`, method: "POST", maxLength: 15, playBeep: true, timeout: 5 });
     res.type("text/xml").send(r.toString());
 });
@@ -309,7 +317,6 @@ app.all("/process-intent", async (req, res) => {
 
     if (intentData.intent === 'music') {
         saveUserHistory(req.body.From, 'music', intentData.query);
-        downloadQueue.set(req.body.CallSid, { query: intentData.query }); // Store query for "Liking" later
         searchAndDownloadYTDLP(req.body.CallSid, intentData.query);
         await playOrSay(r, `Finding ${intentData.query}`);
         r.redirect(`${CONFIG.BASE_URL}/music-wait-loop`);
@@ -317,7 +324,6 @@ app.all("/process-intent", async (req, res) => {
         chatQueue.set(req.body.CallSid, { status: 'pending' });
         r.say({ language: 'en-US' }, "Let me look that up...");
         
-        // Process chat background
         chatWithGemini(intentData.query).then(async (replyText) => {
             saveUserHistory(req.body.From, 'chat', intentData.query, replyText);
             const ttsFilename = await generateFreeTTS(replyText);
