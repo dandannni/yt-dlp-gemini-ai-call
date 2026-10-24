@@ -1,106 +1,75 @@
 // ==============================================================================
-// 1. IMPORTS & SETUP (Loading the modules needed for the Voice OS)
+// 🚀 VOICE OS: THE ULTIMATE EDITION (CHAT, MUSIC, PODCASTS, NEWS, FFMPEG PLAYER)
 // ==============================================================================
-console.log("🚀 Starting Voice OS Phase 1: MONGODB + NEW MAIN MENU + YNET NEWS...");
+console.log("🚀 Starting Voice OS: MASTER EDITION...");
 
-import express from "express";               // Web server framework for Twilio webhooks
-import dotenv from "dotenv";                 // Loads environment variables (like MONGODB_URI)
-import twilio from "twilio";                 // Twilio SDK for generating voice responses
-import { GoogleGenerativeAI } from "@google/generative-ai"; // Google's AI brain
-import path from "path";                     // Node.js tool to find file paths
-import fs from "fs";                         // Node.js tool to read/write temp files
-import { spawn } from "child_process";       // Allows us to run yt-dlp and edge-tts in the background
-import { v4 as uuidv4 } from "uuid";         // Generates random IDs for audio files
-import { MongoClient } from "mongodb";       // NEW: Connects to your free cloud database!
-import RSSParser from "rss-parser";          // NEW: Parses XML files from Ynet News
+import express from "express";
+import dotenv from "dotenv";
+import twilio from "twilio";
+import { GoogleGenerativeAI } from "@google/generative-ai";
+import path from "path";
+import fs from "fs";
+import { spawn } from "child_process";
+import { v4 as uuidv4 } from "uuid";
+import { MongoClient } from "mongodb";
+import RSSParser from "rss-parser";
 
-dotenv.config(); // Activate the hidden variables
+dotenv.config();
+const VoiceResponse = twilio.twiml.VoiceResponse;
+const rssParser = new RSSParser();
 
 // ==============================================================================
-// 2. MONGODB CLOUD DATABASE INITIALIZATION
+// 💾 MONGODB CLOUD DATABASE
 // ==============================================================================
-// We create a new MongoDB client using the URI you put in Render
 const mongoClient = new MongoClient(process.env.MONGODB_URI);
-let db; // This will hold our database connection
-let usersCol; // This will hold the "Users" table (collection)
+let usersCol;
 
-// This function connects to the cloud database when the server starts
 async function connectDB() {
     try {
-        await mongoClient.connect(); // Actually connects over the internet
-        db = mongoClient.db("VoiceOS"); // Creates/opens a database named "VoiceOS"
-        usersCol = db.collection("users"); // Creates/opens a table named "users"
-        console.log("✅ MongoDB Connected Successfully!");
-    } catch (err) {
-        console.error("❌ MongoDB Connection Error:", err);
-    }
+        await mongoClient.connect();
+        usersCol = mongoClient.db("VoiceOS").collection("users");
+        console.log("✅ MongoDB Connected!");
+    } catch (err) { console.error("❌ MongoDB Error:", err); }
 }
-connectDB(); // Run the connection immediately
+connectDB();
 
-// ------------------------------------------------------------------------------
-// DATABASE HELPER FUNCTIONS (Now Async because Cloud DB takes milliseconds to reply)
-// ------------------------------------------------------------------------------
-
-// Fetches a user from Mongo. If they don't exist, it creates a blank profile.
 async function getUser(phone) {
     let user = await usersCol.findOne({ phone: phone });
     if (!user) {
-        user = { phone, music_history: [], chat_history: [], likes: [], settings: {} };
+        user = { phone, music_history: [], chat_history: [], likes: [], settings: { chat_voice: 'he-IL-HilaNeural', search_engine: 'scsearch1:' } };
         await usersCol.insertOne(user);
     }
     return user;
 }
-
-// Saves a song to history (keeps last 10)
-async function saveMusicHistory(phone, songQuery) {
-    let user = await getUser(phone);
-    user.music_history = user.music_history.filter(s => s !== songQuery); // Remove duplicates
-    user.music_history.unshift(songQuery); // Add to the front
-    if (user.music_history.length > 10) user.music_history.pop(); // Keep only 10
-    await usersCol.updateOne({ phone }, { $set: { music_history: user.music_history } }); // Save to cloud
-}
-
-// Saves a chat message to history (keeps last 10)
-async function saveChatHistory(phone, role, text) {
-    let user = await getUser(phone);
-    user.chat_history.push({ role: role === 'user' ? 'user' : 'model', parts: [{ text }] });
-    if (user.chat_history.length > 10) user.chat_history = user.chat_history.slice(-10);
-    await usersCol.updateOne({ phone }, { $set: { chat_history: user.chat_history } });
-}
+async function updateUser(phone, updateQuery) { await usersCol.updateOne({ phone }, updateQuery); }
 
 // ==============================================================================
-// 3. SERVER SETTINGS & IN-MEMORY QUEUES
+// ⚙️ SYSTEM CONFIG & IN-MEMORY PLAYER STATE
 // ==============================================================================
 const CONFIG = {
-    PORT: process.env.PORT || 3000, // Render sets the port automatically
+    PORT: process.env.PORT || 3000,
     BASE_URL: process.env.RENDER_EXTERNAL_URL || "https://gpt-phone-call.onrender.com", 
-    DOWNLOAD_DIR: "/tmp", // Temporary folder for downloaded mp3s
+    DOWNLOAD_DIR: "/tmp",
     TWILIO_ACCOUNT_SID: process.env.TWILIO_ACCOUNT_SID,
     TWILIO_AUTH_TOKEN: process.env.TWILIO_AUTH_TOKEN,
     VERIFIED_CALLERS: ["+972548498889", "+972554402506", "+972525585720", "+972528263032", "+972583230268"],
-    GEMINI_KEYS: [process.env.GEMINI_API_KEY, process.env.GEMINI_API_KEY_2, process.env.GEMINI_API_KEY_3].filter(k => k)
+    GEMINI_KEYS: [process.env.GEMINI_API_KEY, process.env.GEMINI_API_KEY_2].filter(k => k)
 };
 
-// Create the temporary download folder if it doesn't exist
 if (!fs.existsSync(CONFIG.DOWNLOAD_DIR)) fs.mkdirSync(CONFIG.DOWNLOAD_DIR);
-
 function isHebrewText(text) { return /[\u0590-\u05FF]/.test(text); }
 
-// These variables just hold temporary data while a phone call is active (they reset when call ends)
-const downloadQueue = new Map();
-const chatQueue = new Map();
-const sessions = new Map(); 
-
-function getSession(callSid) {
-    if (!sessions.has(callSid)) sessions.set(callSid, { browseType: null, browseIndex: 0, browseList: [] });
-    return sessions.get(callSid);
+// The Player State tracks where you are in a song/podcast so you can pause & fast-forward
+const activeCalls = new Map(); 
+function getCallState(callSid) {
+    if (!activeCalls.has(callSid)) activeCalls.set(callSid, { mode: null, offset: 0, startTime: 0, fileUrl: null, isPodcast: false, isPaused: false, playlist: [], playlistIndex: 0 });
+    return activeCalls.get(callSid);
 }
 
 // ==============================================================================
-// 4. AUDIO TOOLS (Text-to-Speech & Downloading)
+// 🔊 AUDIO ENGINE (TTS & FFMPEG STREAMING)
 // ==============================================================================
-// Converts Text into a spoken MP3 file using Edge-TTS
-async function generateFreeTTS(text) {
+async function generateFreeTTS(text, forceVoice = null) {
     return new Promise((resolve) => {
         const id = uuidv4();
         const filename = `tts_${id}.mp3`;
@@ -108,208 +77,460 @@ async function generateFreeTTS(text) {
         const safeText = text.replace(/["'\n]/g, ' ').trim();
         if (!safeText) return resolve(null);
         
-        const voice = isHebrewText(safeText) ? 'he-IL-HilaNeural' : 'en-US-ChristopherNeural';
+        const voice = forceVoice || (isHebrewText(safeText) ? 'he-IL-HilaNeural' : 'en-US-ChristopherNeural');
         const child = spawn('edge-tts',['--text', safeText, '--voice', voice, '--write-media', outputPath]);
         
         child.on('close', (code) => {
             if (code === 0 && fs.existsSync(outputPath)) {
-                setTimeout(() => { if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath) }, 300000); // Erase after 5 min
+                setTimeout(() => { if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath); }, 300000);
                 resolve(filename);
             } else { resolve(null); }
         });
     });
 }
 
-// Downloads the user's voice recording from Twilio's servers
+// Helper to play menu TTS
+async function gatherPlayOrSay(r, text, actionUrl, timeoutVal, voice = null) {
+    const ttsFilename = await generateFreeTTS(text, voice);
+    const g = r.gather({ input: "dtmf", numDigits: 1, action: actionUrl, method: "POST", timeout: timeoutVal });
+    if (ttsFilename) g.play(`${CONFIG.BASE_URL}/temp-audio/${ttsFilename}`);
+    else g.say(text);
+}
+
 async function fetchTwilioRecording(recordingUrl) {
     try {
         await new Promise(resolve => setTimeout(resolve, 500)); 
         const authHeader = "Basic " + Buffer.from(`${CONFIG.TWILIO_ACCOUNT_SID}:${CONFIG.TWILIO_AUTH_TOKEN}`).toString("base64");
         const res = await fetch(recordingUrl + ".mp3", { headers: { "Authorization": authHeader } });
-        if (!res.ok) return null;
-        return Buffer.from(await res.arrayBuffer()).toString('base64'); // Converts audio to text string so Gemini can read it
+        return res.ok ? Buffer.from(await res.arrayBuffer()).toString('base64') : null;
     } catch (e) { return null; }
 }
 
 // ==============================================================================
-// 5. YNET NEWS (MIVZAKIM) RSS PARSER - PHASE 1
+// 🧠 GEMINI AI
 // ==============================================================================
-const rssParser = new RSSParser();
-
-// Fetches the live XML feed from Ynet and converts it to JavaScript Objects
-async function fetchYnetNews() {
-    try {
-        // Ynet's Mivzakim URL
-        const feed = await rssParser.parseURL('https://www.ynet.co.il/Integration/StoryRss3082.xml');
-        return feed.items; // Returns an array of news articles
-    } catch (e) {
-        console.error("RSS Fetch Error:", e);
-        return [];
+async function chatWithGemini(phone, userInputText) {
+    let user = await getUser(phone);
+    for (const key of CONFIG.GEMINI_KEYS) {
+        try {
+            const genAI = new GoogleGenerativeAI(key);
+            const model = genAI.getGenerativeModel({ 
+                model: "gemini-2.5-flash",
+                tools: [{ googleSearch: {} }],
+                systemInstruction: "You are a helpful phone AI. Answer briefly. Keep it conversational."
+            });
+            const chat = model.startChat({ history: user.chat_history.slice(0, -1) });
+            const result = await chat.sendMessage(userInputText);
+            const reply = result.response.text().replace(/\*/g, '');
+            
+            user.chat_history.push({ role: 'model', parts: [{ text: reply }] });
+            await updateUser(phone, { $set: { chat_history: user.chat_history.slice(-10) } });
+            return reply;
+        } catch (e) {}
     }
+    return "API Error.";
 }
 
 // ==============================================================================
-// 6. EXPRESS WEB SERVER & CALL ROUTES
+// 🚀 EXPRESS ROUTES (THE OPERATING SYSTEM)
 // ==============================================================================
 const app = express();
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
-const VoiceResponse = twilio.twiml.VoiceResponse;
 
-app.get("/", (req, res) => res.send("Voice OS is awake!")); // Keeps server alive for UptimeRobot
+app.get("/", (req, res) => res.send("Voice OS Online"));
 
-// Serves generated MP3 files back to Twilio
-app.get("/music/:filename", (req, res) => {
+// Serves Standard TTS Audio
+app.get("/temp-audio/:filename", (req, res) => {
     const f = path.resolve(CONFIG.DOWNLOAD_DIR, req.params.filename);
     if (fs.existsSync(f)) {
-        res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Content-Length': fs.statSync(f).size });
+        res.setHeader('Content-Type', 'audio/mpeg');
         fs.createReadStream(f).pipe(res);
     } else res.status(404).send("File Gone");
 });
 
-// A helper to play TTS audio but allow the user to press a button to interrupt it
-async function gatherPlayOrSay(r, text, actionUrl, timeoutVal) {
-    const ttsFilename = await generateFreeTTS(text);
-    const g = r.gather({ input: "dtmf", numDigits: 1, action: actionUrl, method: "POST", timeout: timeoutVal });
-    if (ttsFilename) g.play(`${CONFIG.BASE_URL}/music/${ttsFilename}`);
-    else g.say({ language: isHebrewText(text) ? 'he-IL' : 'en-US' }, text);
-}
+// FFMPEG STREAMING ENGINE (Enables Pause, Fast-Forward, Rewind)
+app.get("/stream-audio", (req, res) => {
+    const fileUrl = req.query.url;   // Can be local file or external Podcast URL!
+    const offset = parseFloat(req.query.offset) || 0;
+    
+    res.setHeader('Content-Type', 'audio/mpeg');
+    if (offset > 0) {
+        // Uses FFmpeg to jump to the exact second instantly
+        const child = spawn('ffmpeg', ['-ss', offset.toString(), '-i', fileUrl, '-c', 'copy', '-f', 'mp3', 'pipe:1']);
+        child.stdout.pipe(res);
+    } else {
+        if (fileUrl.startsWith('http')) {
+            // Stream external podcast direct to phone
+            const child = spawn('ffmpeg', ['-i', fileUrl, '-c', 'copy', '-f', 'mp3', 'pipe:1']);
+            child.stdout.pipe(res);
+        } else {
+            // Serve local file normally
+            fs.createReadStream(fileUrl).pipe(res);
+        }
+    }
+});
 
 // ------------------------------------------------------------------------------
-// NEW MAIN MENU (The Gateway to the OS)
+// GLOBAL CANCEL (*)
+// ------------------------------------------------------------------------------
+app.all("/interrupt", (req, res) => {
+    const r = new VoiceResponse();
+    if (req.body.Digits === "*") r.redirect(`${CONFIG.BASE_URL}/twiml`);
+    res.type("text/xml").send(r.toString());
+});
+
+// ------------------------------------------------------------------------------
+// THE MAIN MENU (BOOT)
 // ------------------------------------------------------------------------------
 app.all("/twiml", async (req, res) => {
     const caller = req.body.From;
-    // Reject unknown callers for security
     if (!CONFIG.VERIFIED_CALLERS.includes(caller)) { const r = new VoiceResponse(); r.reject(); return res.type("text/xml").send(r.toString()); }
     
     const r = new VoiceResponse();
-    // Welcome message offering the 4 systems. (Star to cancel at any time).
-    const menuText = "Welcome to the system. Press 1 for AI Chat. Press 2 for Music. Press 3 for Podcasts. Press 4 for News. Or press Star at any time to return here.";
-    
-    await gatherPlayOrSay(r, menuText, `${CONFIG.BASE_URL}/main-menu-router`, 5);
+    const menu = "Voice O.S. Press 1 for Chat. 2 for Music. 3 for Podcasts. 4 for News.";
+    await gatherPlayOrSay(r, menu, `${CONFIG.BASE_URL}/main-router`, 5);
     res.type("text/xml").send(r.toString());
 });
 
-// Routes the user based on which button (1-4) they pressed
-app.all("/main-menu-router", async (req, res) => {
+app.all("/main-router", (req, res) => {
     const r = new VoiceResponse();
+    const d = req.body.Digits;
+    if (d === "1") r.redirect(`${CONFIG.BASE_URL}/chat-menu`);
+    else if (d === "2") r.redirect(`${CONFIG.BASE_URL}/music-menu`);
+    else if (d === "3") r.redirect(`${CONFIG.BASE_URL}/podcast-menu`);
+    else if (d === "4") r.redirect(`${CONFIG.BASE_URL}/news-init`);
+    else r.redirect(`${CONFIG.BASE_URL}/twiml`);
+    res.type("text/xml").send(r.toString());
+});
+
+// ------------------------------------------------------------------------------
+// SYSTEM 1: AI CHAT
+// ------------------------------------------------------------------------------
+app.all("/chat-menu", async (req, res) => {
+    const r = new VoiceResponse();
+    await gatherPlayOrSay(r, "Chat. 1 for New, 2 to Continue, 4 for Voice Settings.", `${CONFIG.BASE_URL}/chat-router`, 5);
+    res.type("text/xml").send(r.toString());
+});
+
+app.all("/chat-router", async (req, res) => {
+    const r = new VoiceResponse();
+    const phone = req.body.From;
+    if (req.body.Digits === "1") {
+        await updateUser(phone, { $set: { chat_history: [] } }); // Clear history
+        await gatherPlayOrSay(r, "New chat. Speak after beep.", `${CONFIG.BASE_URL}/interrupt`, 0);
+        r.record({ action: `${CONFIG.BASE_URL}/chat-process`, maxLength: 60, playBeep: true, timeout: 5 });
+    } else if (req.body.Digits === "2") {
+        await gatherPlayOrSay(r, "Continuing. Speak after beep.", `${CONFIG.BASE_URL}/interrupt`, 0);
+        r.record({ action: `${CONFIG.BASE_URL}/chat-process`, maxLength: 60, playBeep: true, timeout: 5 });
+    } else if (req.body.Digits === "4") {
+        let user = await getUser(phone);
+        const newVoice = user.settings.chat_voice === 'he-IL-HilaNeural' ? 'he-IL-AvriNeural' : 'he-IL-HilaNeural';
+        await updateUser(phone, { $set: { "settings.chat_voice": newVoice } });
+        await gatherPlayOrSay(r, "Voice changed.", `${CONFIG.BASE_URL}/chat-menu`, 1, newVoice);
+    } else { r.redirect(`${CONFIG.BASE_URL}/chat-menu`); }
+    res.type("text/xml").send(r.toString());
+});
+
+app.all("/chat-process", async (req, res) => {
+    const r = new VoiceResponse();
+    const phone = req.body.From;
+    const base64Audio = await fetchTwilioRecording(req.body.RecordingUrl);
+    
+    // Quick routing using Flash
+    const genAI = new GoogleGenerativeAI(CONFIG.GEMINI_KEYS[0]);
+    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+    const prompt = "Extract EXACT text spoken. If silent, output SILENCE.";
+    const result = await model.generateContent([prompt, { inlineData: { mimeType: "audio/mp3", data: base64Audio } }]);
+    const query = result.response.text().trim();
+
+    if (query === "SILENCE") { r.redirect(`${CONFIG.BASE_URL}/chat-menu`); return res.type("text/xml").send(r.toString()); }
+
+    // Save user message, get AI reply
+    let user = await getUser(phone);
+    user.chat_history.push({ role: 'user', parts: [{ text: query }] });
+    await updateUser(phone, { $set: { chat_history: user.chat_history } });
+    
+    const reply = await chatWithGemini(phone, query);
+    
+    // Play reply and listen for next message
+    await gatherPlayOrSay(r, reply, `${CONFIG.BASE_URL}/interrupt`, 1, user.settings.chat_voice);
+    r.record({ action: `${CONFIG.BASE_URL}/chat-process`, maxLength: 60, playBeep: true, timeout: 5 });
+    
+    res.type("text/xml").send(r.toString());
+});
+
+// ------------------------------------------------------------------------------
+// SYSTEM 2: MUSIC & THE SPOTIFY PLAYER
+// ------------------------------------------------------------------------------
+app.all("/music-menu", async (req, res) => {
+    const r = new VoiceResponse();
+    await gatherPlayOrSay(r, "Music. 1 Search. 2 History. 3 Saved. 4 Playlists. 5 Settings.", `${CONFIG.BASE_URL}/music-router`, 5);
+    res.type("text/xml").send(r.toString());
+});
+
+app.all("/music-router", async (req, res) => {
+    const r = new VoiceResponse();
+    const phone = req.body.From;
     const d = req.body.Digits;
 
     if (d === "1") {
-        // AI SYSTEM (Temporary redirect until Phase 4)
-        await gatherPlayOrSay(r, "AI System. Please speak your question after the beep.", `${CONFIG.BASE_URL}/twiml`, 0);
-        r.record({ action: `${CONFIG.BASE_URL}/process-intent-chat`, method: "POST", maxLength: 300, playBeep: true, timeout: 5 });
-    } 
-    else if (d === "2") {
-        // MUSIC SYSTEM (Temporary redirect until Phase 2)
-        await gatherPlayOrSay(r, "Music System. Please speak the song name after the beep.", `${CONFIG.BASE_URL}/twiml`, 0);
-        r.record({ action: `${CONFIG.BASE_URL}/process-intent-music`, method: "POST", maxLength: 300, playBeep: true, timeout: 5 });
-    } 
-    else if (d === "3") {
-        // PODCAST SYSTEM (Placeholder until Phase 3)
-        await gatherPlayOrSay(r, "Podcasts are coming soon in Phase 3. Returning to menu.", `${CONFIG.BASE_URL}/twiml`, 1);
-        r.redirect(`${CONFIG.BASE_URL}/twiml`);
-    } 
-    else if (d === "4") {
-        // NEWS SYSTEM (Live!)
-        await gatherPlayOrSay(r, "Fetching latest news...", `${CONFIG.BASE_URL}/twiml`, 0);
-        r.redirect(`${CONFIG.BASE_URL}/news-init`);
-    } 
-    else {
-        // Any other button goes back to Main Menu
+        await gatherPlayOrSay(r, "Say song name.", `${CONFIG.BASE_URL}/interrupt`, 0);
+        r.record({ action: `${CONFIG.BASE_URL}/music-search-process`, maxLength: 10, playBeep: true, timeout: 3 });
+    } else if (d === "2") {
+        let user = await getUser(phone);
+        getCallState(req.body.CallSid).playlist = user.music_history;
+        r.redirect(`${CONFIG.BASE_URL}/playlist-browser`);
+    } else if (d === "3") {
+        let user = await getUser(phone);
+        getCallState(req.body.CallSid).playlist = user.likes;
+        r.redirect(`${CONFIG.BASE_URL}/playlist-browser`);
+    } else if (d === "4") {
+        // Auto-play saved songs
+        let user = await getUser(phone);
+        const state = getCallState(req.body.CallSid);
+        state.playlist = user.likes.sort(() => 0.5 - Math.random()); // Shuffle
+        state.playlistIndex = 0;
+        state.mode = 'playlist_auto';
+        r.redirect(`${CONFIG.BASE_URL}/music-download-init`);
+    } else if (d === "5") {
+        let user = await getUser(phone);
+        const newEngine = user.settings.search_engine === 'scsearch1:' ? 'ytsearch1:' : 'scsearch1:';
+        await updateUser(phone, { $set: { "settings.search_engine": newEngine } });
+        await gatherPlayOrSay(r, `Engine set to ${newEngine.replace('1:','')}`, `${CONFIG.BASE_URL}/music-menu`, 1);
+    } else { r.redirect(`${CONFIG.BASE_URL}/music-menu`); }
+    res.type("text/xml").send(r.toString());
+});
+
+app.all("/music-search-process", async (req, res) => {
+    const r = new VoiceResponse();
+    const phone = req.body.From;
+    const base64Audio = await fetchTwilioRecording(req.body.RecordingUrl);
+    
+    const genAI = new GoogleGenerativeAI(CONFIG.GEMINI_KEYS[0]);
+    const result = await genAI.getGenerativeModel({ model: "gemini-2.5-flash" }).generateContent(["Extract song name spoken exactly.", { inlineData: { mimeType: "audio/mp3", data: base64Audio } }]);
+    const query = result.response.text().trim();
+
+    await saveMusicHistory(phone, query);
+    const state = getCallState(req.body.CallSid);
+    state.playlist = [query];
+    state.playlistIndex = 0;
+    state.mode = 'single';
+    
+    await gatherPlayOrSay(r, `Finding ${query}`, `${CONFIG.BASE_URL}/interrupt`, 0);
+    r.redirect(`${CONFIG.BASE_URL}/music-download-init`);
+    res.type("text/xml").send(r.toString());
+});
+
+// Downloads the song and preps the player
+app.all("/music-download-init", async (req, res) => {
+    const r = new VoiceResponse();
+    const phone = req.body.From;
+    const state = getCallState(req.body.CallSid);
+    let user = await getUser(phone);
+    const query = state.playlist[state.playlistIndex];
+    
+    if (!query) { r.redirect(`${CONFIG.BASE_URL}/music-menu`); return res.type("text/xml").send(r.toString()); }
+
+    const id = uuidv4();
+    const outputPath = path.join(CONFIG.DOWNLOAD_DIR, `${id}.mp3`);
+    const args = [`${user.settings.search_engine}${query}`, '-x', '--audio-format', 'mp3', '--match-filter', 'duration < 600', '-o', outputPath];
+    
+    spawn('yt-dlp', args).on('close', () => {
+        if (fs.existsSync(outputPath)) {
+            state.fileUrl = outputPath;
+            state.isPodcast = false;
+            state.offset = 0;
+            state.isPaused = false;
+            // Hack to trigger playback via wait loop
+            fs.writeFileSync(path.join(CONFIG.DOWNLOAD_DIR, `READY_${req.body.CallSid}`), "done");
+        }
+    });
+
+    r.redirect(`${CONFIG.BASE_URL}/music-wait-loop`);
+    res.type("text/xml").send(r.toString());
+});
+
+app.all("/music-wait-loop", (req, res) => {
+    const r = new VoiceResponse();
+    const readyFile = path.join(CONFIG.DOWNLOAD_DIR, `READY_${req.body.CallSid}`);
+    
+    if (fs.existsSync(readyFile)) {
+        fs.unlinkSync(readyFile);
+        r.redirect(`${CONFIG.BASE_URL}/player-play`);
+    } else {
+        r.pause({ length: 3 });
+        r.redirect(`${CONFIG.BASE_URL}/music-wait-loop`);
+    }
+    res.type("text/xml").send(r.toString());
+});
+
+// ------------------------------------------------------------------------------
+// THE MASTER MEDIA PLAYER (Controls Twilio playback)
+// ------------------------------------------------------------------------------
+app.all("/player-play", (req, res) => {
+    const r = new VoiceResponse();
+    const state = getCallState(req.body.CallSid);
+    
+    if (state.isPaused) {
+        const g = r.gather({ input: "dtmf", numDigits: 1, action: `${CONFIG.BASE_URL}/player-action`, timeout: 3600 }); // Wait 1 hr for unpause
+        g.say("Paused. Press 5 to resume.");
+    } else {
+        state.startTime = Date.now(); // Mark when playback started
+        const streamUrl = `${CONFIG.BASE_URL}/stream-audio?url=${encodeURIComponent(state.fileUrl)}&offset=${state.offset}`;
+        
+        // Play the stream. If user presses a button, it interrupts and goes to /player-action
+        const g = r.gather({ input: "dtmf", numDigits: 1, action: `${CONFIG.BASE_URL}/player-action`, timeout: 0 });
+        g.play(streamUrl);
+        
+        // If the song finishes naturally without buttons pressed
+        r.redirect(`${CONFIG.BASE_URL}/player-finished`);
+    }
+    res.type("text/xml").send(r.toString());
+});
+
+app.all("/player-action", async (req, res) => {
+    const r = new VoiceResponse();
+    const state = getCallState(req.body.CallSid);
+    const d = req.body.Digits;
+    const phone = req.body.From;
+
+    // Calculate how much time passed before they pressed a button
+    if (!state.isPaused) {
+        const elapsed = (Date.now() - state.startTime) / 1000;
+        state.offset += elapsed;
+    }
+
+    if (d === "*") { r.redirect(`${CONFIG.BASE_URL}/twiml`); return res.type("text/xml").send(r.toString()); }
+    else if (d === "5") state.isPaused = !state.isPaused;
+    else if (d === "6") state.offset += 60;
+    else if (d === "4") state.offset = Math.max(0, state.offset - 60);
+    else if (d === "3") state.offset += 20;
+    else if (d === "1") state.offset = Math.max(0, state.offset - 20);
+    else if (d === "8") {
+        let user = await getUser(phone);
+        const currentSong = state.playlist[state.playlistIndex];
+        if (currentSong && !user.likes.includes(currentSong)) {
+            user.likes.push(currentSong);
+            await updateUser(phone, { $set: { likes: user.likes } });
+        }
+    }
+
+    r.redirect(`${CONFIG.BASE_URL}/player-play`); // Resume with new offset/pause state
+    res.type("text/xml").send(r.toString());
+});
+
+app.all("/player-finished", (req, res) => {
+    const r = new VoiceResponse();
+    const state = getCallState(req.body.CallSid);
+    
+    if (state.mode === 'playlist_auto') {
+        state.playlistIndex++;
+        if (state.playlistIndex < state.playlist.length) {
+            r.redirect(`${CONFIG.BASE_URL}/music-download-init`); // Play next song
+        } else {
+            r.redirect(`${CONFIG.BASE_URL}/music-menu`); // Playlist over
+        }
+    } else {
         r.redirect(`${CONFIG.BASE_URL}/twiml`);
     }
     res.type("text/xml").send(r.toString());
 });
 
 // ------------------------------------------------------------------------------
-// YNET NEWS LOGIC (PHASE 1 FEATURE)
+// SYSTEM 3: PODCASTS (Apple iTunes API + RSS)
 // ------------------------------------------------------------------------------
-// This fetches the news and sets up the user's session
+const PODCASTS = [
+    { name: "Osim Historia", term: "עושים+היסטוריה" },
+    { name: "B'zman She'avadtem", term: "בזמן+שעבדתם" },
+    { name: "Echad Ba'yom", term: "אחד+ביום" },
+    { name: "Osim Technologia", term: "עושים+טכנולוגיה" },
+    { name: "Ha'tshuva", term: "התשובה" }
+];
+
+app.all("/podcast-menu", async (req, res) => {
+    const r = new VoiceResponse();
+    let msg = "Podcasts. ";
+    PODCASTS.forEach((p, i) => msg += `Press ${i+1} for ${p.name}. `);
+    await gatherPlayOrSay(r, msg, `${CONFIG.BASE_URL}/podcast-fetch`, 10);
+    res.type("text/xml").send(r.toString());
+});
+
+app.all("/podcast-fetch", async (req, res) => {
+    const r = new VoiceResponse();
+    const index = parseInt(req.body.Digits) - 1;
+    if (!PODCASTS[index]) { r.redirect(`${CONFIG.BASE_URL}/podcast-menu`); return res.type("text/xml").send(r.toString()); }
+
+    await gatherPlayOrSay(r, "Fetching latest episode...", `${CONFIG.BASE_URL}/interrupt`, 0);
+
+    try {
+        // Find RSS feed via iTunes API
+        const itunesRes = await fetch(`https://itunes.apple.com/search?term=${PODCASTS[index].term}&entity=podcast`);
+        const itunesData = await itunesRes.json();
+        const feedUrl = itunesData.results[0].feedUrl;
+        
+        // Parse RSS Feed for newest episode MP3
+        const feed = await rssParser.parseURL(feedUrl);
+        const latestEp = feed.items[0];
+        
+        // Send directly to Player Engine (No downloading required!)
+        const state = getCallState(req.body.CallSid);
+        state.fileUrl = latestEp.enclosure.url; // Direct MP3 Link
+        state.isPodcast = true;
+        state.offset = 0;
+        state.isPaused = false;
+        state.mode = 'single';
+        
+        r.redirect(`${CONFIG.BASE_URL}/player-play`);
+    } catch (e) {
+        r.redirect(`${CONFIG.BASE_URL}/podcast-menu`);
+    }
+    res.type("text/xml").send(r.toString());
+});
+
+// ------------------------------------------------------------------------------
+// SYSTEM 4: YNET NEWS (MIVZAKIM)
+// ------------------------------------------------------------------------------
 app.all("/news-init", async (req, res) => {
     const r = new VoiceResponse();
-    const session = getSession(req.body.CallSid);
-    
-    const articles = await fetchYnetNews(); // Downloads the RSS Feed
-    if (articles.length === 0) {
-        await gatherPlayOrSay(r, "Could not fetch news right now. Returning.", `${CONFIG.BASE_URL}/twiml`, 1);
-        r.redirect(`${CONFIG.BASE_URL}/twiml`);
-        return res.type("text/xml").send(r.toString());
-    }
-
-    // Save the articles to the user's temporary call session
-    session.browseType = 'news';
-    session.browseList = articles;
-    session.browseIndex = 0; // Start at the newest article (index 0)
-    
-    r.redirect(`${CONFIG.BASE_URL}/news-browser`);
+    try {
+        const feed = await rssParser.parseURL('https://www.ynet.co.il/Integration/StoryRss3082.xml');
+        const state = getCallState(req.body.CallSid);
+        state.playlist = feed.items;
+        state.playlistIndex = 0;
+        r.redirect(`${CONFIG.BASE_URL}/news-browser`);
+    } catch (e) { r.redirect(`${CONFIG.BASE_URL}/twiml`); }
     res.type("text/xml").send(r.toString());
 });
 
-// Reads the headline and prompts for next actions
 app.all("/news-browser", async (req, res) => {
     const r = new VoiceResponse();
-    const session = getSession(req.body.CallSid);
-    const article = session.browseList[session.browseIndex];
-
-    // Menu options for news
-    const menuText = `Mivzak. ${article.title}. Press 6 for next. Press 4 for previous. Press 8 for details.`;
+    const state = getCallState(req.body.CallSid);
+    const article = state.playlist[state.playlistIndex];
     
-    // Listen for their button press (4, 6, 8, or *)
-    await gatherPlayOrSay(r, menuText, `${CONFIG.BASE_URL}/news-action`, 10);
-    
-    r.redirect(`${CONFIG.BASE_URL}/twiml`); // Failsafe if they do nothing
+    await gatherPlayOrSay(r, `News. ${article.title}. 6 Next. 4 Prev. 8 Details.`, `${CONFIG.BASE_URL}/news-action`, 10);
+    r.redirect(`${CONFIG.BASE_URL}/twiml`);
     res.type("text/xml").send(r.toString());
 });
 
-// Handles the logic when they press 4, 6, or 8 in the News app
 app.all("/news-action", async (req, res) => {
     const r = new VoiceResponse();
-    const session = getSession(req.body.CallSid);
+    const state = getCallState(req.body.CallSid);
     const d = req.body.Digits;
 
-    if (d === "*") { 
-        r.redirect(`${CONFIG.BASE_URL}/twiml`); // Star = Exit to Main Menu
-    } 
-    else if (d === "6") {
-        // Go to next (older) article
-        if (session.browseIndex < session.browseList.length - 1) session.browseIndex++; 
-        r.redirect(`${CONFIG.BASE_URL}/news-browser`);
-    } 
-    else if (d === "4") {
-        // Go to previous (newer) article
-        if (session.browseIndex > 0) session.browseIndex--; 
-        r.redirect(`${CONFIG.BASE_URL}/news-browser`);
-    } 
+    if (d === "*") r.redirect(`${CONFIG.BASE_URL}/twiml`);
+    else if (d === "6" && state.playlistIndex < state.playlist.length - 1) { state.playlistIndex++; r.redirect(`${CONFIG.BASE_URL}/news-browser`); }
+    else if (d === "4" && state.playlistIndex > 0) { state.playlistIndex--; r.redirect(`${CONFIG.BASE_URL}/news-browser`); }
     else if (d === "8") {
-        // Read full details of the current article
-        const article = session.browseList[session.browseIndex];
-        const detailsText = `Details. ${article.contentSnippet || "No further details available."}. Returning to headline.`;
-        
-        await gatherPlayOrSay(r, detailsText, `${CONFIG.BASE_URL}/news-action`, 1);
+        await gatherPlayOrSay(r, state.playlist[state.playlistIndex].contentSnippet || "No details.", `${CONFIG.BASE_URL}/interrupt`, 1);
         r.redirect(`${CONFIG.BASE_URL}/news-browser`);
-    } 
-    else {
-        r.redirect(`${CONFIG.BASE_URL}/news-browser`);
-    }
+    } else { r.redirect(`${CONFIG.BASE_URL}/news-browser`); }
     res.type("text/xml").send(r.toString());
 });
 
 // ------------------------------------------------------------------------------
-// GLOBAL CANCEL (The Star Key *)
+// ANTI-CRASH SHIELDS & START
 // ------------------------------------------------------------------------------
-app.all("/interrupt-router", (req, res) => {
-    const r = new VoiceResponse();
-    if (req.body.Digits === "*") { r.redirect(`${CONFIG.BASE_URL}/twiml`); } 
-    res.type("text/xml").send(r.toString());
-});
-
-// ==============================================================================
-// 7. ANTI-CRASH SHIELDS & START SERVER
-// ==============================================================================
-// These shields prevent the entire server from crashing if a random error occurs
-process.on('uncaughtException', (err) => console.error('Caught exception:', err.message));
-process.on('unhandledRejection', (reason) => console.error('Unhandled Rejection:', reason));
-
-app.listen(CONFIG.PORT, () => console.log(`🚀 Server Online: PORT ${CONFIG.PORT}`));
+process.on('uncaughtException', (err) => console.error('Caught:', err.message));
+process.on('unhandledRejection', (reason) => console.error('Unhandled:', reason));
+app.listen(CONFIG.PORT, () => console.log(`🚀 Master OS Online: PORT ${CONFIG.PORT}`));
