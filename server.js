@@ -185,15 +185,18 @@ function isHebrew(text) {
 }
 
 // ✅ NEW (Safe, will never freeze or timeout
-async function generateFreeTTS(text, forceVoice = null) {
+async function generateTTS(text, userSettings = {}) {
     return new Promise((resolve) => {
         const id = uuidv4();
         const filename = `tts_${id}.mp3`;
         const outputPath = path.join(CONFIG.DOWNLOAD_DIR, filename);
         const safeText = (text || "").replace(/["'\n\r]/g, ' ').trim();
         if (!safeText) return resolve(null);
-        
-        const voice = forceVoice || (isHebrewText(safeText) ? 'he-IL-HilaNeural' : 'en-US-ChristopherNeural');
+
+        const voice = isHebrew(safeText)
+            ? (userSettings?.voice_he || 'he-IL-HilaNeural')
+            : (userSettings?.voice_en || 'en-US-ChristopherNeural');
+
         const child = spawn('python3', ['-m', 'edge_tts', '--text', safeText, '--voice', voice, '--write-media', outputPath]);
         
         // 🚨 PREVENTS 15-SECOND CRASH / TIMEOUT
