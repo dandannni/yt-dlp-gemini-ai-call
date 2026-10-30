@@ -184,34 +184,34 @@ function isHebrew(text) {
     return /[\u0590-\u05FF]/.test(text); 
 }
 
-async function generateTTS(text, userSettings = {}) {
+// ✅ NEW (Safe, will never freeze or timeout)
+async function generateFreeTTS(text, forceVoice = null) {
     return new Promise((resolve) => {
         const id = uuidv4();
         const filename = `tts_${id}.mp3`;
         const outputPath = path.join(CONFIG.DOWNLOAD_DIR, filename);
-        const safeText = text.replace(/["'\n\r]/g, " ").trim();
+        const safeText = (text || "").replace(/["'\n\r]/g, ' ').trim();
         if (!safeText) return resolve(null);
+        
+        const voice = forceVoice || (isHebrewText(safeText) ? 'he-IL-HilaNeural' : 'en-US-ChristopherNeural');
+        const child = spawn('python3', ['-m', 'edge_tts', '--text', safeText, '--voice', voice, '--write-media', outputPath]);
+        
+        // 🚨 PREVENTS 15-SECOND CRASH / TIMEOUT
+        child.on('error', (err) => {
+            console.warn('⚠️ Edge-TTS failed, falling back to Twilio Say:', err.message);
+            resolve(null);
+        });
 
-        const voice = isHebrew(safeText)
-            ? (userSettings.voice_he || "he-IL-HilaNeural")
-            : (userSettings.voice_en || "en-US-ChristopherNeural");
-
-        const child = spawn("edge-tts", ["--text", safeText, "--voice", voice, "--write-media", outputPath]);
-
-        child.on("close", (code) => {
+        child.on('close', (code) => {
             if (code === 0 && fs.existsSync(outputPath)) {
-                // Auto cleanup after 5 minutes
-                setTimeout(() => {
-                    if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
-                }, 300000);
+                setTimeout(() => { if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath); }, 300000);
                 resolve(filename);
-            } else {
-                resolve(null);
+            } else { 
+                resolve(null); 
             }
         });
     });
 }
-
 async function playSay(twimlResponse, text, userSettings = {}) {
     const filename = await generateTTS(text, userSettings);
     if (filename) {
