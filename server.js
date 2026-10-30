@@ -184,7 +184,7 @@ function isHebrew(text) {
     return /[\u0590-\u05FF]/.test(text); 
 }
 
-// ✅ NEW (Safe, will never freeze or timeout)
+// ✅ NEW (Safe, will never freeze or timeout
 async function generateFreeTTS(text, forceVoice = null) {
     return new Promise((resolve) => {
         const id = uuidv4();
