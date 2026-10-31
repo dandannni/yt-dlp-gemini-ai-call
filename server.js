@@ -1,5 +1,5 @@
 // ==============================================================================
-// 🚀 VOICE OS v10.0 MASTER: FLAWLESS, FAST & HIGHLY DURABLE
+// 🚀 VOICE OS v10.5 ENTERPRISE: COMPLETE SUITE (ALL FEATURES + ALL-HEBREW)
 // ==============================================================================
 import express from "express";
 import dotenv from "dotenv";
@@ -9,7 +9,7 @@ import path from "path";
 import fs from "fs";
 import { spawn } from "child_process";
 import { v4 as uuidv4 } from "uuid";
-import { MongoClient, ObjectId } from "mongodb";
+import { MongoClient } from "mongodb";
 import RSSParser from "rss-parser";
 
 dotenv.config();
@@ -18,12 +18,13 @@ const VoiceResponse = twilio.twiml.VoiceResponse;
 const rssParser = new RSSParser();
 
 // ------------------------------------------------------------------------------
-// ⚙️ CONFIGURATION & SECURITY
+// ⚙️ CONFIGURATION & COOKIES
 // ------------------------------------------------------------------------------
 const CONFIG = {
     PORT: process.env.PORT || 3000,
     BASE_URL: (process.env.RENDER_EXTERNAL_URL || "https://gpt-phone-call.onrender.com").replace(/\/$/, ""),
     DOWNLOAD_DIR: "/tmp/voice_os_media",
+    COOKIES_FILE: "/tmp/voice_os_media/cookies.txt",
     TWILIO_ACCOUNT_SID: process.env.TWILIO_ACCOUNT_SID,
     TWILIO_AUTH_TOKEN: process.env.TWILIO_AUTH_TOKEN,
     VERIFIED_CALLERS: [
@@ -37,184 +38,126 @@ const CONFIG = {
         process.env.GEMINI_API_KEY, 
         process.env.GEMINI_API_KEY_2, 
         process.env.GEMINI_API_KEY_3
-    ].filter(Boolean)
+    ].filter(Boolean),
+    GEMINI_MODELS: ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
 };
 
 if (!fs.existsSync(CONFIG.DOWNLOAD_DIR)) {
     fs.mkdirSync(CONFIG.DOWNLOAD_DIR, { recursive: true });
 }
 
+// Decode YouTube Cookies if provided via Environment Variable
+if (process.env.YTDLP_COOKIES_B64) {
+    try {
+        const decoded = Buffer.from(process.env.YTDLP_COOKIES_B64, "base64").toString("utf-8");
+        fs.writeFileSync(CONFIG.COOKIES_FILE, decoded);
+        console.log("🍪 [COOKIES] YouTube cookies successfully written to:", CONFIG.COOKIES_FILE);
+    } catch (err) {
+        console.error("❌ [COOKIES] Failed to decode YTDLP_COOKIES_B64:", err.message);
+    }
+}
+
 // ------------------------------------------------------------------------------
-// 💾 MONGODB DATABASE LAYER
+// 💾 MONGODB DATABASE
 // ------------------------------------------------------------------------------
 const mongoClient = new MongoClient(process.env.MONGODB_URI);
-let db, usersCol, podcastsCol;
+let usersCol, podcastsCol;
 
 async function connectDB() {
     try {
         await mongoClient.connect();
-        db = mongoClient.db("VoiceOS_v10");
+        const db = mongoClient.db("VoiceOS_v10");
         usersCol = db.collection("users");
         podcastsCol = db.collection("podcasts_cache");
-        console.log("✅ MongoDB Connected Successfully.");
-        await syncPodcasts();
+        console.log("✅ [DB] Connected to MongoDB Atlas.");
+        syncPodcasts();
     } catch (err) {
-        console.error("❌ MongoDB Connection Fatal Error:", err);
+        console.error("❌ [DB ERROR]:", err.message);
     }
 }
 connectDB();
 
 async function getUser(phone) {
-    let user = await usersCol.findOne({ phone });
-    if (!user) {
-        user = {
+    try {
+        let user = await usersCol.findOne({ phone });
+        if (!user) {
+            user = {
+                phone,
+                active_chat_id: null,
+                chats: [],
+                music_history: [],
+                likes: [],
+                playlists: { "מועדפים": [] },
+                settings: {
+                    voice_he: "he-IL-HilaNeural",
+                    voice_en: "en-US-ChristopherNeural",
+                    search_engine: "ytsearch1:",
+                    system_prompt_id: "default"
+                }
+            };
+            await usersCol.insertOne(user);
+        }
+        return user;
+    } catch (e) {
+        console.warn("⚠️ [DB] Fallback user profile:", e.message);
+        return {
             phone,
-            active_chat_id: null,
-            chats: [], // [{ id, title, isSaved: false, turns: [{ role, text }] }]
+            chats: [],
             music_history: [],
             likes: [],
-            playlists: { "Favorites": [] }, // { playlistName: [songQuery] }
-            settings: {
-                voice_he: "he-IL-HilaNeural",
-                voice_en: "en-US-ChristopherNeural",
-                search_engine: "scsearch1:", // "scsearch1:" (Soundcloud) or "ytsearch1:" (YouTube)
-                system_prompt_id: "default"   // "default", "concise", "scholar", "creative"
-            }
+            playlists: { "מועדפים": [] },
+            settings: { voice_he: "he-IL-HilaNeural", voice_en: "en-US-ChristopherNeural", search_engine: "ytsearch1:", system_prompt_id: "default" }
         };
-        await usersCol.insertOne(user);
     }
-    return user;
 }
 
-async function updateUser(phone, updateQuery) {
-    return await usersCol.updateOne({ phone }, updateQuery);
+async function updateUser(phone, updateQuery, options = {}) {
+    try {
+        await usersCol.updateOne({ phone }, updateQuery, options);
+    } catch (e) {
+        console.error("❌ [DB UPDATE ERROR]:", e.message);
+    }
 }
 
 // ------------------------------------------------------------------------------
-// 🧠 GEMINI MULTI-KEY ROTATION & HELPERS
-// ------------------------------------------------------------------------------
-const SYSTEM_PROMPTS = {
-    default: "You are a fast, intelligent phone voice assistant. Keep answers natural, accurate, and concise (2-4 sentences max). Respond in the exact language spoken.",
-    concise: "Answer in strictly ONE punchy sentence. No introductory filler words. Respond in the exact language spoken.",
-    scholar: "You are an encyclopedic expert. Deliver deep, accurate, intellectual explanations in 3-5 sentences.",
-    creative: "You are a witty, charismatic assistant with clever insights and humor. Keep replies conversational."
-};
-
-async function executeGeminiWithFailover(apiTask) {
-    for (let i = 0; i < CONFIG.GEMINI_KEYS.length; i++) {
-        const key = CONFIG.GEMINI_KEYS[i];
-        try {
-            const genAI = new GoogleGenerativeAI(key);
-            return await apiTask(genAI);
-        } catch (err) {
-            console.warn(`⚠️ Gemini Key [${i}] error: ${err.message}. Failing over...`);
-        }
-    }
-    throw new Error("All configured Gemini API keys exhausted or rate-limited.");
-}
-
-async function transcribeAndAnswer(phone, base64Audio, chatId = null) {
-    const user = await getUser(phone);
-    const systemInstruction = SYSTEM_PROMPTS[user.settings?.system_prompt_id || "default"];
-
-    let session = user.chats.find(c => c.id === chatId);
-    if (!session) {
-        session = { id: uuidv4(), title: "New Conversation", isSaved: false, createdAt: new Date(), turns: [] };
-        await updateUser(phone, { $push: { chats: session }, $set: { active_chat_id: session.id } });
-    }
-
-    return await executeGeminiWithFailover(async (genAI) => {
-        // Step 1: Transcribe user audio
-        const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
-        const sttPrompt = "Transcribe the exact spoken words from this audio. If silent or unintelligible, reply 'SILENCE'.";
-        const sttResult = await model.generateContent([
-            sttPrompt, 
-            { inlineData: { mimeType: "audio/mp3", data: base64Audio } }
-        ]);
-        const userText = sttResult.response.text().trim();
-
-        if (userText === "SILENCE" || !userText) {
-            return { userText: null, replyText: "I could not hear anything. Please try again." };
-        }
-
-        // Step 2: Append user turn
-        session.turns.push({ role: "user", text: userText });
-        if (session.turns.length === 1) {
-            session.title = userText.slice(0, 35);
-        }
-
-        // Step 3: Run grounded conversational model
-        const chatModel = genAI.getGenerativeModel({
-            model: "gemini-2.5-flash",
-            tools: [{ googleSearch: {} }],
-            systemInstruction
-        });
-
-        const formattedHistory = session.turns.slice(0, -1).map(t => ({
-            role: t.role === "user" ? "user" : "model",
-            parts: [{ text: t.text }]
-        }));
-
-        const chat = chatModel.startChat({ history: formattedHistory });
-        const response = await chat.sendMessage(userText);
-        const replyText = response.response.text().replace(/\*/g, "").trim();
-
-        session.turns.push({ role: "model", text: replyText });
-
-        // Keep last 16 turns per session for performance
-        if (session.turns.length > 16) {
-            session.turns = session.turns.slice(-16);
-        }
-
-        await updateUser(phone, { 
-            $set: { 
-                "chats.$[elem].turns": session.turns,
-                "chats.$[elem].title": session.title 
-            } 
-        }, { arrayFilters: [{ "elem.id": session.id }] });
-
-        return { userText, replyText, session };
-    });
-}
-
-// ------------------------------------------------------------------------------
-// 🔊 AUDIO ENGINE: EDGE-TTS & FFMPEG
+// 🔊 AUDIO ENGINE: EDGE-TTS
 // ------------------------------------------------------------------------------
 function isHebrew(text) { 
     return /[\u0590-\u05FF]/.test(text); 
 }
 
-// ✅ NEW (Safe, will never freeze or timeout
 async function generateTTS(text, userSettings = {}) {
     return new Promise((resolve) => {
         const id = uuidv4();
         const filename = `tts_${id}.mp3`;
         const outputPath = path.join(CONFIG.DOWNLOAD_DIR, filename);
-        const safeText = (text || "").replace(/["'\n\r]/g, ' ').trim();
+        const safeText = (text || "").replace(/["'\n\r]/g, " ").trim();
         if (!safeText) return resolve(null);
 
         const voice = isHebrew(safeText)
-            ? (userSettings?.voice_he || 'he-IL-HilaNeural')
-            : (userSettings?.voice_en || 'en-US-ChristopherNeural');
+            ? (userSettings?.voice_he || "he-IL-HilaNeural")
+            : (userSettings?.voice_en || "en-US-ChristopherNeural");
 
-        const child = spawn('python3', ['-m', 'edge_tts', '--text', safeText, '--voice', voice, '--write-media', outputPath]);
-        
-        // 🚨 PREVENTS 15-SECOND CRASH / TIMEOUT
-        child.on('error', (err) => {
-            console.warn('⚠️ Edge-TTS failed, falling back to Twilio Say:', err.message);
+        console.log(`🗣️ [TTS] (${voice}): "${safeText.slice(0, 45)}..."`);
+
+        const child = spawn("python3", ["-m", "edge_tts", "--text", safeText, "--voice", voice, "--write-media", outputPath]);
+
+        child.on("error", (err) => {
+            console.warn("⚠️ [TTS] edge-tts spawn error:", err.message);
             resolve(null);
         });
 
-        child.on('close', (code) => {
+        child.on("close", (code) => {
             if (code === 0 && fs.existsSync(outputPath)) {
                 setTimeout(() => { if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath); }, 300000);
                 resolve(filename);
-            } else { 
-                resolve(null); 
+            } else {
+                resolve(null);
             }
         });
     });
 }
+
 async function playSay(twimlResponse, text, userSettings = {}) {
     const filename = await generateTTS(text, userSettings);
     if (filename) {
@@ -225,29 +168,114 @@ async function playSay(twimlResponse, text, userSettings = {}) {
 }
 
 async function fetchTwilioRecording(url) {
+    console.log(`📥 [TWILIO] Downloading audio from: ${url}.mp3`);
     try {
         await new Promise(r => setTimeout(r, 600));
-        const auth = "Basic " + Buffer.from(`${CONFIG.TWILIO_ACCOUNT_SID}:${CONFIG.TWILIO_AUTH_TOKEN}`).toString("base64");
-        const res = await fetch(`${url}.mp3`, { headers: { Authorization: auth } });
-        if (!res.ok) return null;
-        return Buffer.from(await res.arrayBuffer()).toString("base64");
-    } catch {
+        let headers = {};
+        if (CONFIG.TWILIO_ACCOUNT_SID && CONFIG.TWILIO_AUTH_TOKEN) {
+            headers["Authorization"] = "Basic " + Buffer.from(`${CONFIG.TWILIO_ACCOUNT_SID}:${CONFIG.TWILIO_AUTH_TOKEN}`).toString("base64");
+        }
+        const res = await fetch(`${url}.mp3`, { headers });
+        if (!res.ok) {
+            console.error(`❌ [TWILIO] Download failed HTTP ${res.status}`);
+            return null;
+        }
+        const buffer = Buffer.from(await res.arrayBuffer());
+        console.log(`✅ [TWILIO] Audio ready: ${buffer.length} bytes`);
+        return buffer.toString("base64");
+    } catch (e) {
+        console.error("❌ [TWILIO] Error fetching audio:", e.message);
         return null;
     }
 }
 
 // ------------------------------------------------------------------------------
-// 📻 IN-MEMORY CALL & PLAYER SESSIONS
+// 🧠 GEMINI ENGINE WITH PROMPT PERSONAS & MULTI-MODEL FAILOVER
+// ------------------------------------------------------------------------------
+const SYSTEM_PERSONAS = {
+    default: "אתה עוזר טלפוני חכם, מדויק ואדיב. ענה תמיד בעברית טבעית וברורה. ענה בקצרה (2 עד 3 משפטים בלבד) כדי שהמשתמש יוכל להאזין בנוחות בטלפון.",
+    concise: "ענה אך ורק במשפט אחד קצר, מדויק ולעניין. ללא מילות פתיחה או ברכות מיותרות.",
+    scholar: "אתה איש אשכולות ומלומד. ספק תשובות מעמיקות, מדויקות ואינטלקטואליות ב-3 עד 4 משפטים.",
+    creative: "אתה עוזר שנון, מצחיק ומלא הומור. ענה בצורה משעשעת וחכמה."
+};
+
+async function executeGeminiWithFailover(apiTask) {
+    for (const key of CONFIG.GEMINI_KEYS) {
+        const genAI = new GoogleGenerativeAI(key);
+        for (const modelName of CONFIG.GEMINI_MODELS) {
+            try {
+                return await apiTask(genAI, modelName);
+            } catch (err) {
+                console.warn(`⚠️ [GEMINI] Failover from ${modelName}: ${err.message}`);
+            }
+        }
+    }
+    throw new Error("All configured Gemini API keys and models exhausted!");
+}
+
+async function transcribeAndAnswer(phone, base64Audio, chatId = null) {
+    const user = await getUser(phone);
+    const systemPrompt = SYSTEM_PERSONAS[user.settings?.system_prompt_id || "default"];
+
+    let session = user.chats.find(c => c.id === chatId);
+    if (!session) {
+        session = { id: uuidv4(), title: "שיחה חדשה", isSaved: false, createdAt: new Date(), turns: [] };
+        user.chats.push(session);
+    }
+
+    return await executeGeminiWithFailover(async (genAI, modelName) => {
+        console.log(`🤖 [GEMINI] Transcribing speech using ${modelName}...`);
+        const model = genAI.getGenerativeModel({ model: modelName });
+        
+        const sttResult = await model.generateContent([
+            "תמלל במדויק את המילים שנאמרו בהקלטה זו. ענה אך ורק בטקסט הנאמר, ללא שום מילים נוספות, הסברים או מרכאות. אם שקט, כתוב SILENCE.", 
+            { inlineData: { mimeType: "audio/mp3", data: base64Audio } }
+        ]);
+        const userText = sttResult.response.text().trim();
+        console.log(`🗣️ [GEMINI] Spoken text: "${userText}"`);
+
+        if (userText === "SILENCE" || !userText) {
+            return { userText: null, replyText: "לא הצלחתי לשמוע אותך. אנא נסה שוב." };
+        }
+
+        session.turns.push({ role: "user", text: userText });
+        if (session.turns.length === 1) session.title = userText.slice(0, 32);
+
+        const chatModel = genAI.getGenerativeModel({
+            model: modelName,
+            tools: [{ googleSearch: {} }],
+            systemInstruction: systemPrompt
+        });
+
+        const history = session.turns.slice(0, -1).map(t => ({
+            role: t.role === "user" ? "user" : "model",
+            parts: [{ text: t.text }]
+        }));
+
+        const chat = chatModel.startChat({ history });
+        const response = await chat.sendMessage(userText);
+        const replyText = response.response.text().replace(/\*/g, "").trim();
+        console.log(`🤖 [GEMINI] AI Reply: "${replyText.slice(0, 50)}..."`);
+
+        session.turns.push({ role: "model", text: replyText });
+        if (session.turns.length > 20) session.turns = session.turns.slice(-20);
+
+        await updateUser(phone, { $set: { chats: user.chats, active_chat_id: session.id } });
+        return { userText, replyText, session };
+    });
+}
+
+// ------------------------------------------------------------------------------
+// 📻 IN-MEMORY CALL SESSIONS
 // ------------------------------------------------------------------------------
 const callSessions = new Map();
 
 function getCall(callSid) {
     if (!callSessions.has(callSid)) {
         callSessions.set(callSid, {
-            mode: null,
             chatId: null,
             chatTurnIdx: 0,
-            browseType: null, // "history", "likes", "chats"
+            browseType: null,
             browseIndex: 0,
             browseList: [],
             player: {
@@ -267,10 +295,10 @@ function getCall(callSid) {
 }
 
 // ------------------------------------------------------------------------------
-// 🎙️ PODCAST AUTO-UPDATER CRON
+// 🎙️ PODCAST AUTO-UPDATER
 // ------------------------------------------------------------------------------
 const PODCAST_REGISTRY = [
-    { id: 1, name: "עושים היסטוריה", term: "עושים+היסטוריה" },
+    { id: 1, name: "עושים היסטוריה עם ערן ניצן", term: "עושים+היסטוריה" },
     { id: 2, name: "בזמן שעבדתם", term: "בזמן+שעבדתם" },
     { id: 3, name: "אחד ביום", term: "אחד+ביום" },
     { id: 4, name: "עושים טכנולוגיה", term: "עושים+טכנולוגיה" },
@@ -278,7 +306,7 @@ const PODCAST_REGISTRY = [
 ];
 
 async function syncPodcasts() {
-    console.log("🔄 Background Syncing Top 5 Israeli Podcasts...");
+    console.log("🔄 [PODCASTS] Syncing Israeli podcast feeds...");
     for (const pod of PODCAST_REGISTRY) {
         try {
             const itunes = await fetch(`https://itunes.apple.com/search?term=${pod.term}&entity=podcast`);
@@ -289,33 +317,31 @@ async function syncPodcasts() {
             const episodes = (feed.items || []).slice(0, 10).map(item => ({
                 title: item.title,
                 pubDate: item.pubDate,
-                enclosureUrl: item.enclosure?.url,
-                duration: item.itunes?.duration || ""
+                enclosureUrl: item.enclosure?.url
             })).filter(ep => ep.enclosureUrl);
 
-            await podcastsCol.updateOne(
+            await podcastsCol?.updateOne(
                 { podcastId: pod.id },
                 { $set: { podcastId: pod.id, name: pod.name, episodes, lastUpdated: new Date() } },
                 { upsert: true }
             );
         } catch (err) {
-            console.error(`Failed to sync podcast ${pod.name}:`, err.message);
+            console.warn(`⚠️ [PODCASTS] Could not update ${pod.name}:`, err.message);
         }
     }
-    console.log("✅ Podcasts Cached.");
+    console.log("✅ [PODCASTS] All feeds synced.");
 }
-setInterval(syncPodcasts, 30 * 60 * 1000); // Sync every 30 minutes
+setInterval(syncPodcasts, 30 * 60 * 1000);
 
 // ------------------------------------------------------------------------------
-// 🌐 EXPRESS WEB SERVER & AUDIO PIPING
+// 🌐 EXPRESS APP & AUDIO STREAMER
 // ------------------------------------------------------------------------------
 const app = express();
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
-app.get("/", (req, res) => res.send("🚀 Voice O.S. Master v10 Online."));
+app.get("/", (req, res) => res.send("🚀 Voice OS v10.5 ENTERPRISE Online."));
 
-// Serve TTS temporary files
 app.get("/audio/:filename", (req, res) => {
     const filePath = path.resolve(CONFIG.DOWNLOAD_DIR, req.params.filename);
     if (fs.existsSync(filePath)) {
@@ -326,17 +352,21 @@ app.get("/audio/:filename", (req, res) => {
     }
 });
 
-// Real-Time Audio Streaming Engine with Offset & Dynamic Volume Transcoding
 app.get("/stream-audio", (req, res) => {
     const fileUrl = req.query.url;
     const offset = Math.max(0, parseFloat(req.query.offset) || 0);
     const volume = parseFloat(req.query.vol) || 1.0;
 
+    console.log(`📻 [STREAM] Streaming: offset=${offset}s, vol=${volume}, src=${fileUrl?.slice(0, 40)}...`);
+
     res.setHeader("Content-Type", "audio/mpeg");
     res.setHeader("Transfer-Encoding", "chunked");
 
-    // Telephony transcode pipe: Mono, 16000Hz MP3 stream with precise offset & volume
     const ffmpegArgs = [
+        "-reconnect", "1",
+        "-reconnect_streamed", "1",
+        "-reconnect_delay_max", "5",
+        "-user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "-ss", offset.toString(),
         "-i", fileUrl,
         "-filter:a", `volume=${volume}`,
@@ -351,26 +381,35 @@ app.get("/stream-audio", (req, res) => {
     const child = spawn("ffmpeg", ffmpegArgs);
     child.stdout.pipe(res);
 
+    child.stderr.on("data", (data) => {
+        const msg = data.toString();
+        if (msg.includes("Error") || msg.includes("Failed")) {
+            console.error("❌ [FFMPEG ERROR]:", msg);
+        }
+    });
+
     req.on("close", () => {
         child.kill("SIGKILL");
     });
 });
 
 // ------------------------------------------------------------------------------
-// 🎛️ ROOT MAIN MENU
+// 🎛️ MAIN HEBREW ROUTER
 // ------------------------------------------------------------------------------
 app.all("/twiml", async (req, res) => {
+    console.log(`📞 [CALL] Incoming call from: ${req.body.From}`);
     const caller = req.body.From;
     const r = new VoiceResponse();
 
-    if (!CONFIG.VERIFIED_CALLERS.includes(caller)) {
+    if (CONFIG.VERIFIED_CALLERS.length && !CONFIG.VERIFIED_CALLERS.includes(caller)) {
+        console.warn(`🚫 [CALL] Rejected caller: ${caller}`);
         r.reject();
         return res.type("text/xml").send(r.toString());
     }
 
     const user = await getUser(caller);
     const g = r.gather({ input: "dtmf", numDigits: 1, action: `${CONFIG.BASE_URL}/main-router`, timeout: 6 });
-    await playSay(g, "Main Menu. 1 for Chat. 2 for Music. 3 for Podcasts. 4 for News.", user.settings);
+    await playSay(g, "תפריט ראשי. 1 לשיחה עם בינה מלאכותית. 2 לשירים ומוזיקה. 3 לפודקאסטים. 4 למבזקי חדשות.", user.settings);
     
     r.redirect(`${CONFIG.BASE_URL}/twiml`);
     res.type("text/xml").send(r.toString());
@@ -390,13 +429,13 @@ app.all("/main-router", (req, res) => {
 });
 
 // ==============================================================================
-// 🧠 SYSTEM 1: GEMINI AI CONVERSATIONAL OS
+// 🧠 SYSTEM 1: GEMINI AI CHAT (WITH SETTINGS, VOICE SEARCH & DELETION)
 // ==============================================================================
 app.all("/chat-menu", async (req, res) => {
     const r = new VoiceResponse();
     const user = await getUser(req.body.From);
     const g = r.gather({ input: "dtmf", numDigits: 1, action: `${CONFIG.BASE_URL}/chat-menu-router`, timeout: 6 });
-    await playSay(g, "Chat Menu. 1 for New Chat. 2 for History. 3 for Saved Chats. 4 for Settings.", user.settings);
+    await playSay(g, "שיחה קולית. 1 לשיחה חדשה. 2 להיסטוריה. 3 לשיחות שמורות. 4 להגדרות.", user.settings);
     r.redirect(`${CONFIG.BASE_URL}/twiml`);
     res.type("text/xml").send(r.toString());
 });
@@ -408,19 +447,9 @@ app.all("/chat-menu-router", async (req, res) => {
     const session = getCall(req.body.CallSid);
 
     if (d === "1") {
-        // Create new active chat
-        const newChatId = uuidv4();
-        await updateUser(req.body.From, { $set: { active_chat_id: newChatId } });
-        session.chatId = newChatId;
-
-        const g = r.gather({ input: "dtmf", numDigits: 1, action: `${CONFIG.BASE_URL}/twiml`, timeout: 0 });
-        await playSay(g, "Start speaking your question after the tone. Press pound when done.", user.settings);
-        r.record({
-            action: `${CONFIG.BASE_URL}/chat-input-handler`,
-            finishOnKey: "#",
-            maxLength: 90,
-            playBeep: true
-        });
+        session.chatId = uuidv4();
+        await playSay(r, "אמור את שאלתך לאחר הצליל. בסיום הקש סולמית.", user.settings);
+        r.record({ action: `${CONFIG.BASE_URL}/chat-input-handler`, finishOnKey: "#", maxLength: 90, playBeep: true });
     } else if (d === "2") {
         session.browseType = "chat_history";
         session.browseList = [...user.chats].reverse();
@@ -439,7 +468,6 @@ app.all("/chat-menu-router", async (req, res) => {
     res.type("text/xml").send(r.toString());
 });
 
-// Chat Recording & AI Generation
 app.all("/chat-input-handler", async (req, res) => {
     const r = new VoiceResponse();
     const phone = req.body.From;
@@ -453,17 +481,15 @@ app.all("/chat-input-handler", async (req, res) => {
 
     const base64 = await fetchTwilioRecording(req.body.RecordingUrl);
     if (!base64) {
-        await playSay(r, "Audio processing failed. Please repeat.", user.settings);
+        await playSay(r, "עיבוד הקול נכשל. אנא נסה שוב.", user.settings);
         r.redirect(`${CONFIG.BASE_URL}/chat-menu`);
         return res.type("text/xml").send(r.toString());
     }
 
     try {
-        const activeId = session.chatId || user.active_chat_id;
-        const result = await transcribeAndAnswer(phone, base64, activeId);
-
+        const result = await transcribeAndAnswer(phone, base64, session.chatId);
         if (!result.userText) {
-            await playSay(r, "I did not detect speech.", user.settings);
+            await playSay(r, "לא זוהה דיבור.", user.settings);
             r.redirect(`${CONFIG.BASE_URL}/chat-menu`);
             return res.type("text/xml").send(r.toString());
         }
@@ -474,14 +500,13 @@ app.all("/chat-input-handler", async (req, res) => {
 
         r.redirect(`${CONFIG.BASE_URL}/chat-turn-player`);
     } catch (err) {
-        console.error("AI Error:", err);
-        await playSay(r, "An error occurred with the AI engine.", user.settings);
+        console.error("❌ [CHAT ERROR]:", err.message);
+        await playSay(r, "שגיאה בתקשורת עם הבינה המלאכותית.", user.settings);
         r.redirect(`${CONFIG.BASE_URL}/chat-menu`);
     }
     res.type("text/xml").send(r.toString());
 });
 
-// Chat Turn Playback with 1 (continue), 3 (save), 4/6 (prev/next turn), 5 (repeat)
 app.all("/chat-turn-player", async (req, res) => {
     const r = new VoiceResponse();
     const phone = req.body.From;
@@ -489,17 +514,12 @@ app.all("/chat-turn-player", async (req, res) => {
     const session = getCall(req.body.CallSid);
 
     const chat = user.chats.find(c => c.id === session.chatId);
-    if (!chat || !chat.turns.length) {
-        r.redirect(`${CONFIG.BASE_URL}/chat-menu`);
-        return res.type("text/xml").send(r.toString());
-    }
-
-    const modelTurns = chat.turns.filter(t => t.role === "model");
-    const currentReply = modelTurns[session.chatTurnIdx]?.text || "No reply found.";
+    const modelTurns = chat ? chat.turns.filter(t => t.role === "model") : [];
+    const reply = modelTurns[session.chatTurnIdx]?.text || "סוף שיחה.";
 
     const g = r.gather({ input: "dtmf", numDigits: 1, action: `${CONFIG.BASE_URL}/chat-turn-action`, timeout: 7 });
-    await playSay(g, currentReply, user.settings);
-    await playSay(g, "Press 1 to answer, 3 to save chat, 4 for earlier reply, 6 for next, 5 to replay.", user.settings);
+    await playSay(g, reply, user.settings);
+    await playSay(g, "1 להמשך השיחה, 3 לשמירה, 4 לתשובה קודמת, 6 לתשובה הבאה, 5 לחזרה.", user.settings);
 
     r.redirect(`${CONFIG.BASE_URL}/twiml`);
     res.type("text/xml").send(r.toString());
@@ -511,33 +531,22 @@ app.all("/chat-turn-action", async (req, res) => {
     const phone = req.body.From;
     const user = await getUser(phone);
     const session = getCall(req.body.CallSid);
-
     const chat = user.chats.find(c => c.id === session.chatId);
     const modelTurns = chat ? chat.turns.filter(t => t.role === "model") : [];
 
     if (d === "1") {
-        // Continue conversational flow
-        r.record({
-            action: `${CONFIG.BASE_URL}/chat-input-handler`,
-            finishOnKey: "#",
-            maxLength: 90,
-            playBeep: true
-        });
+        r.record({ action: `${CONFIG.BASE_URL}/chat-input-handler`, finishOnKey: "#", maxLength: 90, playBeep: true });
     } else if (d === "3") {
-        // Star / Mark Chat
         await updateUser(phone, { $set: { "chats.$[elem].isSaved": true } }, { arrayFilters: [{ "elem.id": session.chatId }] });
-        await playSay(r, "Chat saved to favorites.", user.settings);
+        await playSay(r, "השיחה נשמרה במועדפים.", user.settings);
         r.redirect(`${CONFIG.BASE_URL}/chat-turn-player`);
-    } else if (d === "4") {
-        // Previous turn
-        if (session.chatTurnIdx > 0) session.chatTurnIdx--;
+    } else if (d === "4" && session.chatTurnIdx > 0) {
+        session.chatTurnIdx--;
         r.redirect(`${CONFIG.BASE_URL}/chat-turn-player`);
-    } else if (d === "6") {
-        // Next turn
-        if (session.chatTurnIdx < modelTurns.length - 1) session.chatTurnIdx++;
+    } else if (d === "6" && session.chatTurnIdx < modelTurns.length - 1) {
+        session.chatTurnIdx++;
         r.redirect(`${CONFIG.BASE_URL}/chat-turn-player`);
     } else if (d === "5") {
-        // Repeat
         r.redirect(`${CONFIG.BASE_URL}/chat-turn-player`);
     } else {
         r.redirect(`${CONFIG.BASE_URL}/twiml`);
@@ -545,22 +554,21 @@ app.all("/chat-turn-action", async (req, res) => {
     res.type("text/xml").send(r.toString());
 });
 
-// Chat Browser: History and Saved Chats
 app.all("/chat-browser", async (req, res) => {
     const r = new VoiceResponse();
     const user = await getUser(req.body.From);
     const session = getCall(req.body.CallSid);
 
-    if (!session.browseList || !session.browseList.length) {
-        await playSay(r, "No chats found in this category.", user.settings);
+    if (!session.browseList.length) {
+        await playSay(r, "אין שיחות ברשימה זו.", user.settings);
         r.redirect(`${CONFIG.BASE_URL}/chat-menu`);
         return res.type("text/xml").send(r.toString());
     }
 
     const currentChat = session.browseList[session.browseIndex];
     const g = r.gather({ input: "dtmf", numDigits: 1, action: `${CONFIG.BASE_URL}/chat-browse-action`, timeout: 8 });
-    await playSay(g, `Chat: ${currentChat.title}. Press 5 to enter, 4 for newer, 6 for older, 7 to search, 9 to delete.`, user.settings);
-    
+    await playSay(g, `שיחה: ${currentChat.title}. 5 להיכנס, 4 לחדש יותר, 6 לישן יותר, 7 לחיפוש קולי, 9 למחיקה.`, user.settings);
+
     r.redirect(`${CONFIG.BASE_URL}/chat-menu`);
     res.type("text/xml").send(r.toString());
 });
@@ -573,27 +581,26 @@ app.all("/chat-browse-action", async (req, res) => {
     const user = await getUser(phone);
 
     if (d === "5") {
-        // Enter and continue this chat
         session.chatId = session.browseList[session.browseIndex].id;
         const chat = user.chats.find(c => c.id === session.chatId);
-        const modelTurns = chat.turns.filter(t => t.role === "model");
+        const modelTurns = chat ? chat.turns.filter(t => t.role === "model") : [];
         session.chatTurnIdx = Math.max(0, modelTurns.length - 1);
         r.redirect(`${CONFIG.BASE_URL}/chat-turn-player`);
-    } else if (d === "4") {
-        if (session.browseIndex > 0) session.browseIndex--;
+    } else if (d === "4" && session.browseIndex > 0) {
+        session.browseIndex--;
         r.redirect(`${CONFIG.BASE_URL}/chat-browser`);
-    } else if (d === "6") {
-        if (session.browseIndex < session.browseList.length - 1) session.browseIndex++;
+    } else if (d === "6" && session.browseIndex < session.browseList.length - 1) {
+        session.browseIndex++;
         r.redirect(`${CONFIG.BASE_URL}/chat-browser`);
     } else if (d === "7") {
-        // Voice Search in Chats
-        await playSay(r, "Say the keyword to search your past chats.", user.settings);
-        r.record({ action: `${CONFIG.BASE_URL}/chat-search-process`, maxLength: 8, playBeep: true });
+        // Voice Search through chats
+        await playSay(r, "אמור מילת מפתח לחיפוש בשיחות העבר.", user.settings);
+        r.record({ action: `${CONFIG.BASE_URL}/chat-voice-search-exec`, maxLength: 8, playBeep: true });
     } else if (d === "9") {
         // Delete chat
         const targetId = session.browseList[session.browseIndex].id;
         await updateUser(phone, { $pull: { chats: { id: targetId } } });
-        await playSay(r, "Chat deleted.", user.settings);
+        await playSay(r, "השיחה נמחקה.", user.settings);
         const updated = await getUser(phone);
         session.browseList = session.browseType === "chat_saved" 
             ? updated.chats.filter(c => c.isSaved).reverse()
@@ -606,7 +613,7 @@ app.all("/chat-browse-action", async (req, res) => {
     res.type("text/xml").send(r.toString());
 });
 
-app.all("/chat-search-process", async (req, res) => {
+app.all("/chat-voice-search-exec", async (req, res) => {
     const r = new VoiceResponse();
     const phone = req.body.From;
     const session = getCall(req.body.CallSid);
@@ -614,37 +621,42 @@ app.all("/chat-search-process", async (req, res) => {
     const base64 = await fetchTwilioRecording(req.body.RecordingUrl);
 
     if (base64) {
-        const query = await executeGeminiWithFailover(async (genAI) => {
-            const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
-            const res = await model.generateContent(["Extract the single search word or phrase spoken.", { inlineData: { mimeType: "audio/mp3", data: base64 } }]);
-            return res.response.text().trim();
-        });
+        try {
+            const query = await executeGeminiWithFailover(async (genAI, modelName) => {
+                const m = genAI.getGenerativeModel({ model: modelName });
+                const res = await m.generateContent(["חלץ אך ורק את מילת החיפוש שנאמרה.", { inlineData: { mimeType: "audio/mp3", data: base64 } }]);
+                return res.response.text().trim().toLowerCase();
+            });
 
-        const matches = user.chats.filter(c => 
-            c.title.toLowerCase().includes(query.toLowerCase()) || 
-            c.turns.some(t => t.text.toLowerCase().includes(query.toLowerCase()))
-        );
+            console.log(`🔍 [CHAT SEARCH] Searching past chats for: "${query}"`);
+            const matches = user.chats.filter(c => 
+                c.title.toLowerCase().includes(query) || 
+                c.turns.some(t => t.text.toLowerCase().includes(query))
+            );
 
-        if (matches.length > 0) {
-            session.browseList = matches;
-            session.browseIndex = 0;
-            await playSay(r, `Found ${matches.length} matching conversations.`, user.settings);
-            r.redirect(`${CONFIG.BASE_URL}/chat-browser`);
-            return res.type("text/xml").send(r.toString());
+            if (matches.length > 0) {
+                session.browseList = matches;
+                session.browseIndex = 0;
+                await playSay(r, `נמצאו ${matches.length} שיחות מתאימות.`, user.settings);
+                r.redirect(`${CONFIG.BASE_URL}/chat-browser`);
+                return res.type("text/xml").send(r.toString());
+            }
+        } catch (e) {
+            console.error("❌ [CHAT SEARCH ERROR]:", e.message);
         }
     }
 
-    await playSay(r, "No matching chats found.", user.settings);
+    await playSay(r, "לא נמצאו שיחות מתאימות.", user.settings);
     r.redirect(`${CONFIG.BASE_URL}/chat-browser`);
     res.type("text/xml").send(r.toString());
 });
 
-// Chat Settings: Voice, Model & Persona
+// Chat Settings Menu
 app.all("/chat-settings-menu", async (req, res) => {
     const r = new VoiceResponse();
     const user = await getUser(req.body.From);
     const g = r.gather({ input: "dtmf", numDigits: 1, action: `${CONFIG.BASE_URL}/chat-settings-router`, timeout: 6 });
-    await playSay(g, "Settings. 1 for Hebrew Voice. 2 for English Voice. 3 for System Persona.", user.settings);
+    await playSay(g, "הגדרות צ'אט. 1 להחלפת קול בעברית. 2 להחלפת קול באנגלית. 3 להחלפת סגנון העוזר.", user.settings);
     r.redirect(`${CONFIG.BASE_URL}/chat-menu`);
     res.type("text/xml").send(r.toString());
 });
@@ -656,29 +668,27 @@ app.all("/chat-settings-router", async (req, res) => {
     const user = await getUser(phone);
 
     if (d === "1") {
-        // Toggle Hebrew Voice (Hila / Avri)
-        const nextHe = user.settings.voice_he === "he-IL-HilaNeural" ? "he-IL-AvriNeural" : "he-IL-HilaNeural";
-        await updateUser(phone, { $set: { "settings.voice_he": nextHe } });
-        user.settings.voice_he = nextHe;
-        await playSay(r, `קול עברי שונה ל${nextHe.includes("Hila") ? "הילה" : "אברי"}`, user.settings);
+        const nextVoice = user.settings.voice_he === "he-IL-HilaNeural" ? "he-IL-AvriNeural" : "he-IL-HilaNeural";
+        await updateUser(phone, { $set: { "settings.voice_he": nextVoice } });
+        user.settings.voice_he = nextVoice;
+        await playSay(r, `הקול העברי שונה ל${nextVoice.includes("Hila") ? "הילה" : "אברי"}.`, user.settings);
         r.redirect(`${CONFIG.BASE_URL}/chat-settings-menu`);
     } else if (d === "2") {
-        // Cycle English Voice (Christopher / Jenny / Guy)
         const enVoices = ["en-US-ChristopherNeural", "en-US-JennyNeural", "en-US-GuyNeural"];
-        const currentIdx = enVoices.indexOf(user.settings.voice_en);
-        const nextEn = enVoices[(currentIdx + 1) % enVoices.length];
-        await updateUser(phone, { $set: { "settings.voice_en": nextEn } });
-        user.settings.voice_en = nextEn;
-        await playSay(r, `English voice set.`, user.settings);
+        const curIdx = enVoices.indexOf(user.settings.voice_en);
+        const nextVoice = enVoices[(curIdx + 1) % enVoices.length];
+        await updateUser(phone, { $set: { "settings.voice_en": nextVoice } });
+        user.settings.voice_en = nextVoice;
+        await playSay(r, `English voice updated.`, user.settings);
         r.redirect(`${CONFIG.BASE_URL}/chat-settings-menu`);
     } else if (d === "3") {
-        // Toggle Personas
         const personas = ["default", "concise", "scholar", "creative"];
         const curIdx = personas.indexOf(user.settings.system_prompt_id);
         const nextPersona = personas[(curIdx + 1) % personas.length];
         await updateUser(phone, { $set: { "settings.system_prompt_id": nextPersona } });
         user.settings.system_prompt_id = nextPersona;
-        await playSay(r, `Persona set to ${nextPersona}.`, user.settings);
+        const labels = { default: "רגיל", concise: "תמציתי", scholar: "מלומד", creative: "משעשע" };
+        await playSay(r, `סגנון השיחה שונה ל${labels[nextPersona]}.`, user.settings);
         r.redirect(`${CONFIG.BASE_URL}/chat-settings-menu`);
     } else {
         r.redirect(`${CONFIG.BASE_URL}/chat-menu`);
@@ -687,13 +697,13 @@ app.all("/chat-settings-router", async (req, res) => {
 });
 
 // ==============================================================================
-// 🎵 SYSTEM 2: MUSIC OS & PLAYLIST SYSTEM
+// 🎵 SYSTEM 2: MUSIC OS (SEARCH, HISTORY, LIKES, PLAYLISTS & SETTINGS)
 // ==============================================================================
 app.all("/music-menu", async (req, res) => {
     const r = new VoiceResponse();
     const user = await getUser(req.body.From);
     const g = r.gather({ input: "dtmf", numDigits: 1, action: `${CONFIG.BASE_URL}/music-router`, timeout: 6 });
-    await playSay(g, "Music. 1 Search. 2 History. 3 Saved Songs. 4 Playlists. 5 Settings.", user.settings);
+    await playSay(g, "מוזיקה. 1 לחיפוש שיר. 2 להיסטוריה. 3 לשירים שמורים. 4 לפלייליסטים. 5 להגדרות מנוע.", user.settings);
     r.redirect(`${CONFIG.BASE_URL}/twiml`);
     res.type("text/xml").send(r.toString());
 });
@@ -706,8 +716,8 @@ app.all("/music-router", async (req, res) => {
     const session = getCall(req.body.CallSid);
 
     if (d === "1") {
-        await playSay(r, "Say the song and artist name.", user.settings);
-        r.record({ action: `${CONFIG.BASE_URL}/music-search-exec`, maxLength: 10, playBeep: true });
+        await playSay(r, "אמור את שם השיר והאמן לאחר הצליל.", user.settings);
+        r.record({ action: `${CONFIG.BASE_URL}/music-search-exec`, maxLength: 8, playBeep: true });
     } else if (d === "2") {
         session.browseType = "music_history";
         session.browseList = user.music_history;
@@ -721,12 +731,12 @@ app.all("/music-router", async (req, res) => {
     } else if (d === "4") {
         r.redirect(`${CONFIG.BASE_URL}/playlist-menu`);
     } else if (d === "5") {
-        // Toggle Soundcloud vs YouTube
-        const curEngine = user.settings.search_engine || "scsearch1:";
-        const nextEngine = curEngine.startsWith("sc") ? "ytsearch1:" : "scsearch1:";
+        // Toggle Search Engine (YouTube vs SoundCloud)
+        const curEngine = user.settings.search_engine || "ytsearch1:";
+        const nextEngine = curEngine.startsWith("yt") ? "scsearch1:" : "ytsearch1:";
         await updateUser(phone, { $set: { "settings.search_engine": nextEngine } });
         user.settings.search_engine = nextEngine;
-        await playSay(r, `Music engine set to ${nextEngine.includes("yt") ? "YouTube" : "SoundCloud"}.`, user.settings);
+        await playSay(r, `מנוע החיפוש שונה ל${nextEngine.includes("yt") ? "יוטיוב" : "סאונדקלאוד"}.`, user.settings);
         r.redirect(`${CONFIG.BASE_URL}/music-menu`);
     } else {
         r.redirect(`${CONFIG.BASE_URL}/twiml`);
@@ -734,7 +744,6 @@ app.all("/music-router", async (req, res) => {
     res.type("text/xml").send(r.toString());
 });
 
-// Search & Fast Download
 app.all("/music-search-exec", async (req, res) => {
     const r = new VoiceResponse();
     const phone = req.body.From;
@@ -742,63 +751,85 @@ app.all("/music-search-exec", async (req, res) => {
     const base64 = await fetchTwilioRecording(req.body.RecordingUrl);
 
     if (!base64) {
-        await playSay(r, "Could not capture query.", user.settings);
+        await playSay(r, "הקלטת השיר נכשלה.", user.settings);
         r.redirect(`${CONFIG.BASE_URL}/music-menu`);
         return res.type("text/xml").send(r.toString());
     }
 
-    const songQuery = await executeGeminiWithFailover(async (genAI) => {
-        const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
-        const res = await model.generateContent(["Extract song name and artist spoken.", { inlineData: { mimeType: "audio/mp3", data: base64 } }]);
-        return res.response.text().trim();
-    });
+    try {
+        const songQuery = await executeGeminiWithFailover(async (genAI, modelName) => {
+            const m = genAI.getGenerativeModel({ model: modelName });
+            const prompt = "חלץ אך ורק את שם השיר והזמר שנאמרו בהקלטה. החזר אך ורק את מילות החיפוש ללא שום מילים נוספות, הסברים או מרכאות. דוגמה: ישי ריבו סיבה לכל דבר";
+            const res = await m.generateContent([prompt, { inlineData: { mimeType: "audio/mp3", data: base64 } }]);
+            return res.response.text().trim();
+        });
 
-    // Save to history
-    await updateUser(phone, {
-        $push: { music_history: { $each: [songQuery], $position: 0, $slice: 20 } }
-    });
+        console.log(`🎵 [MUSIC] Raw extracted search query: "${songQuery}"`);
 
-    const session = getCall(req.body.CallSid);
-    session.player.title = songQuery;
-    session.player.isPodcast = false;
-    session.player.offset = 0;
-    session.player.volume = 1.0;
+        await updateUser(phone, {
+            $push: { music_history: { $each: [songQuery], $position: 0, $slice: 20 } }
+        });
 
-    await playSay(r, `Searching ${songQuery}`, user.settings);
-    initiateMusicDownload(req.body.CallSid, songQuery, user.settings.search_engine);
+        const session = getCall(req.body.CallSid);
+        session.player.title = songQuery;
+        session.player.isPodcast = false;
+        session.player.offset = 0;
+        session.player.volume = 1.0;
 
-    r.redirect(`${CONFIG.BASE_URL}/music-download-wait-loop`);
+        await playSay(r, `מחפש את ${songQuery}`, user.settings);
+        initiateMusicDownload(req.body.CallSid, songQuery, user.settings.search_engine);
+
+        r.redirect(`${CONFIG.BASE_URL}/music-wait-loop`);
+    } catch (err) {
+        console.error("❌ [MUSIC SEARCH ERROR]:", err.message);
+        await playSay(r, "שגיאה בזיהוי שם השיר.", user.settings);
+        r.redirect(`${CONFIG.BASE_URL}/music-menu`);
+    }
     res.type("text/xml").send(r.toString());
 });
 
-function initiateMusicDownload(callSid, query, engine = "scsearch1:") {
+function initiateMusicDownload(callSid, query, engine = "ytsearch1:") {
     const fileId = uuidv4();
-    const outputPath = path.join(CONFIG.DOWNLOAD_DIR, `${fileId}.mp3`);
+    const outputTemplate = path.join(CONFIG.DOWNLOAD_DIR, `${fileId}.%(ext)s`);
     const marker = path.join(CONFIG.DOWNLOAD_DIR, `READY_${callSid}`);
+
+    console.log(`🎵 [MUSIC] Running yt-dlp: "${engine}${query}"`);
 
     const args = [
         `${engine}${query}`,
-        "-x", "--audio-format", "mp3",
+        "-x",
+        "--audio-format", "mp3",
         "--match-filter", "duration < 900",
         "--force-ipv4",
-        "-o", outputPath
+        "-o", outputTemplate
     ];
 
+    if (fs.existsSync(CONFIG.COOKIES_FILE)) {
+        args.push("--cookies", CONFIG.COOKIES_FILE);
+    }
+
     const child = spawn("yt-dlp", args);
+
     child.on("close", (code) => {
-        if (code === 0 && fs.existsSync(outputPath)) {
+        console.log(`🎵 [MUSIC] yt-dlp exited with code: ${code}`);
+        const files = fs.readdirSync(CONFIG.DOWNLOAD_DIR);
+        const found = files.find(f => f.startsWith(fileId) && f.endsWith(".mp3"));
+
+        if (found) {
+            const actualPath = path.join(CONFIG.DOWNLOAD_DIR, found);
+            console.log(`✅ [MUSIC] Download successful: ${actualPath}`);
             const session = getCall(callSid);
-            session.player.url = outputPath;
+            session.player.url = actualPath;
             fs.writeFileSync(marker, "ready");
-            // Auto purge downloaded mp3 after 30 minutes
-            setTimeout(() => { if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath); }, 1800000);
+            setTimeout(() => { if (fs.existsSync(actualPath)) fs.unlinkSync(actualPath); }, 1800000);
         } else {
+            console.error("❌ [MUSIC] Song file not found after download!");
             fs.writeFileSync(marker, "error");
         }
     });
 }
 
-app.all("/music-download-wait-loop", (req, res) => {
+app.all("/music-wait-loop", (req, res) => {
     const r = new VoiceResponse();
     const marker = path.join(CONFIG.DOWNLOAD_DIR, `READY_${req.body.CallSid}`);
 
@@ -813,27 +844,26 @@ app.all("/music-download-wait-loop", (req, res) => {
         }
     } else {
         r.pause({ length: 2 });
-        r.redirect(`${CONFIG.BASE_URL}/music-download-wait-loop`);
+        r.redirect(`${CONFIG.BASE_URL}/music-wait-loop`);
     }
     res.type("text/xml").send(r.toString());
 });
 
-// Music Browsing (History & Likes)
 app.all("/music-browser", async (req, res) => {
     const r = new VoiceResponse();
     const session = getCall(req.body.CallSid);
     const user = await getUser(req.body.From);
 
-    if (!session.browseList || !session.browseList.length) {
-        await playSay(r, "Your list is empty.", user.settings);
+    if (!session.browseList?.length) {
+        await playSay(r, "הרשימה ריקה.", user.settings);
         r.redirect(`${CONFIG.BASE_URL}/music-menu`);
         return res.type("text/xml").send(r.toString());
     }
 
-    const item = session.browseList[session.browseIndex];
+    const song = session.browseList[session.browseIndex];
     const g = r.gather({ input: "dtmf", numDigits: 1, action: `${CONFIG.BASE_URL}/music-browse-action`, timeout: 8 });
-    await playSay(g, `${item}. 5 to play. 4 newer. 6 older. 8 save. 9 remove.`, user.settings);
-    
+    await playSay(g, `${song}. 5 להשמעה, 4 לחדש יותר, 6 לישן יותר, 8 לשמירה, 9 למחיקה.`, user.settings);
+
     r.redirect(`${CONFIG.BASE_URL}/music-menu`);
     res.type("text/xml").send(r.toString());
 });
@@ -847,25 +877,22 @@ app.all("/music-browse-action", async (req, res) => {
     const currentSong = session.browseList[session.browseIndex];
 
     if (d === "5") {
-        // Play
         session.player.title = currentSong;
         session.player.offset = 0;
         session.player.volume = 1.0;
         initiateMusicDownload(req.body.CallSid, currentSong, user.settings.search_engine);
-        r.redirect(`${CONFIG.BASE_URL}/music-download-wait-loop`);
-    } else if (d === "4") {
-        if (session.browseIndex > 0) session.browseIndex--;
+        r.redirect(`${CONFIG.BASE_URL}/music-wait-loop`);
+    } else if (d === "4" && session.browseIndex > 0) {
+        session.browseIndex--;
         r.redirect(`${CONFIG.BASE_URL}/music-browser`);
-    } else if (d === "6") {
-        if (session.browseIndex < session.browseList.length - 1) session.browseIndex++;
+    } else if (d === "6" && session.browseIndex < session.browseList.length - 1) {
+        session.browseIndex++;
         r.redirect(`${CONFIG.BASE_URL}/music-browser`);
     } else if (d === "8") {
-        // Save song
         await updateUser(phone, { $addToSet: { likes: currentSong } });
-        await playSay(r, "Added to saved songs.", user.settings);
+        await playSay(r, "נוסף לשירים השמורים.", user.settings);
         r.redirect(`${CONFIG.BASE_URL}/music-browser`);
     } else if (d === "9") {
-        // Remove from list
         if (session.browseType === "music_likes") {
             await updateUser(phone, { $pull: { likes: currentSong } });
         } else {
@@ -874,7 +901,7 @@ app.all("/music-browse-action", async (req, res) => {
         const updated = await getUser(phone);
         session.browseList = session.browseType === "music_likes" ? updated.likes : updated.music_history;
         session.browseIndex = 0;
-        await playSay(r, "Removed.", user.settings);
+        await playSay(r, "השיר הוסר.", user.settings);
         r.redirect(`${CONFIG.BASE_URL}/music-browser`);
     } else {
         r.redirect(`${CONFIG.BASE_URL}/music-menu`);
@@ -882,12 +909,12 @@ app.all("/music-browse-action", async (req, res) => {
     res.type("text/xml").send(r.toString());
 });
 
-// Playlists Subsystem
+// Custom Playlists Subsystem
 app.all("/playlist-menu", async (req, res) => {
     const r = new VoiceResponse();
     const user = await getUser(req.body.From);
     const g = r.gather({ input: "dtmf", numDigits: 1, action: `${CONFIG.BASE_URL}/playlist-router`, timeout: 6 });
-    await playSay(g, "Playlists. 1 Play a playlist. 2 Create a playlist.", user.settings);
+    await playSay(g, "פלייליסטים. 1 להשמעת פלייליסט. 2 ליצירת פלייליסט חדש.", user.settings);
     r.redirect(`${CONFIG.BASE_URL}/music-menu`);
     res.type("text/xml").send(r.toString());
 });
@@ -901,16 +928,16 @@ app.all("/playlist-router", async (req, res) => {
     if (d === "1") {
         const names = Object.keys(user.playlists || {});
         if (!names.length) {
-            await playSay(r, "No playlists found.", user.settings);
+            await playSay(r, "אין פלייליסטים קיימים.", user.settings);
             r.redirect(`${CONFIG.BASE_URL}/playlist-menu`);
         } else {
-            let msg = "Choose playlist: ";
-            names.forEach((name, i) => { msg += `Press ${i + 1} for ${name}. `; });
+            let msg = "בחר פלייליסט: ";
+            names.forEach((name, i) => { msg += `הקש ${i + 1} עבור ${name}. `; });
             const g = r.gather({ input: "dtmf", numDigits: 1, action: `${CONFIG.BASE_URL}/playlist-select-play`, timeout: 8 });
             await playSay(g, msg, user.settings);
         }
     } else if (d === "2") {
-        await playSay(r, "Say the name for your new playlist.", user.settings);
+        await playSay(r, "אמור את שם הפלייליסט החדש לאחר הצליל.", user.settings);
         r.record({ action: `${CONFIG.BASE_URL}/playlist-create-exec`, maxLength: 6, playBeep: true });
     } else {
         r.redirect(`${CONFIG.BASE_URL}/playlist-menu`);
@@ -925,14 +952,18 @@ app.all("/playlist-create-exec", async (req, res) => {
     const base64 = await fetchTwilioRecording(req.body.RecordingUrl);
 
     if (base64) {
-        const name = await executeGeminiWithFailover(async (genAI) => {
-            const m = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
-            const res = await m.generateContent(["Extract name spoken.", { inlineData: { mimeType: "audio/mp3", data: base64 } }]);
-            return res.response.text().trim();
-        });
+        try {
+            const name = await executeGeminiWithFailover(async (genAI, modelName) => {
+                const m = genAI.getGenerativeModel({ model: modelName });
+                const res = await m.generateContent(["חלץ אך ורק את השם שנאמר לפלייליסט.", { inlineData: { mimeType: "audio/mp3", data: base64 } }]);
+                return res.response.text().trim();
+            });
 
-        await updateUser(phone, { $set: { [`playlists.${name}`]: [] } });
-        await playSay(r, `Playlist ${name} created.`, user.settings);
+            await updateUser(phone, { $set: { [`playlists.${name}`]: [] } });
+            await playSay(r, `הפלייליסט ${name} נוצר בהצלחה.`, user.settings);
+        } catch (e) {
+            console.error("❌ [PLAYLIST CREATE ERROR]:", e.message);
+        }
     }
     r.redirect(`${CONFIG.BASE_URL}/playlist-menu`);
     res.type("text/xml").send(r.toString());
@@ -947,21 +978,21 @@ app.all("/playlist-select-play", async (req, res) => {
 
     if (names[idx] && user.playlists[names[idx]].length > 0) {
         const session = getCall(req.body.CallSid);
-        // Shuffle play
+        // Random / Shuffled playback
         session.player.playlist = [...user.playlists[names[idx]]].sort(() => 0.5 - Math.random());
         session.player.playlistIdx = 0;
         session.player.title = session.player.playlist[0];
         initiateMusicDownload(req.body.CallSid, session.player.title, user.settings.search_engine);
         r.redirect(`${CONFIG.BASE_URL}/music-download-wait-loop`);
     } else {
-        await playSay(r, "Playlist is empty or invalid.", user.settings);
+        await playSay(r, "הפלייליסט ריק משירים.", user.settings);
         r.redirect(`${CONFIG.BASE_URL}/playlist-menu`);
     }
     res.type("text/xml").send(r.toString());
 });
 
 // ==============================================================================
-// 🎛️ UNIVERSAL MEDIA PLAYER ENGINE (MUSIC & PODCASTS)
+// 🎛️ UNIVERSAL MEDIA PLAYER ENGINE (HEBREW CONTROLS)
 // ==============================================================================
 app.all("/media-player-play", (req, res) => {
     const r = new VoiceResponse();
@@ -970,7 +1001,7 @@ app.all("/media-player-play", (req, res) => {
 
     if (p.isPaused) {
         const g = r.gather({ input: "dtmf", numDigits: 1, action: `${CONFIG.BASE_URL}/media-player-action`, timeout: 3600 });
-        g.say("Paused. Press 5 to resume.");
+        g.say({ language: "he-IL" }, "ההשמעה מושהית. הקש 5 להמשך.");
     } else {
         p.startTime = Date.now();
         const streamUrl = `${CONFIG.BASE_URL}/stream-audio?url=${encodeURIComponent(p.url)}&offset=${p.offset}&vol=${p.volume}`;
@@ -984,7 +1015,6 @@ app.all("/media-player-play", (req, res) => {
 app.all("/media-player-action", async (req, res) => {
     const r = new VoiceResponse();
     const d = req.body.Digits;
-    const phone = req.body.From;
     const session = getCall(req.body.CallSid);
     const p = session.player;
 
@@ -997,28 +1027,25 @@ app.all("/media-player-action", async (req, res) => {
         return res.type("text/xml").send(r.toString());
     }
 
-    // Controls
     if (d === "5") {
         p.isPaused = !p.isPaused;
     } else if (d === "8") {
-        // Save options
+        // In-flight save menu
         r.redirect(`${CONFIG.BASE_URL}/player-save-menu`);
         return res.type("text/xml").send(r.toString());
     } else if (d === "2") {
-        // Volume adjustment
+        // In-flight volume menu
         r.redirect(`${CONFIG.BASE_URL}/player-volume-menu`);
         return res.type("text/xml").send(r.toString());
     }
 
-    // Seeking Logic
+    // Seeking
     if (p.isPodcast) {
-        // Podcast Seek: 4 = -5 min, 6 = +5 min
-        if (d === "4") p.offset = Math.max(0, p.offset - 300);
-        else if (d === "6") p.offset += 300;
+        if (d === "4") p.offset = Math.max(0, p.offset - 300); // 5 min back
+        else if (d === "6") p.offset += 300;                  // 5 min forward
         else if (d === "1") p.offset = Math.max(0, p.offset - 30);
         else if (d === "3") p.offset += 30;
     } else {
-        // Music Seek: 1 (-20s), 3 (+20s), 4 (-60s), 6 (+60s)
         if (d === "1") p.offset = Math.max(0, p.offset - 20);
         else if (d === "3") p.offset += 20;
         else if (d === "4") p.offset = Math.max(0, p.offset - 60);
@@ -1034,7 +1061,7 @@ app.all("/player-save-menu", async (req, res) => {
     const r = new VoiceResponse();
     const user = await getUser(req.body.From);
     const g = r.gather({ input: "dtmf", numDigits: 1, action: `${CONFIG.BASE_URL}/player-save-router`, timeout: 6 });
-    await playSay(g, "Press 1 to add to Saved Songs. 2 to add to a Playlist.", user.settings);
+    await playSay(g, "הקש 1 לשמירה במועדפים. 2 להוספה לפלייליסט.", user.settings);
     r.redirect(`${CONFIG.BASE_URL}/media-player-play`);
     res.type("text/xml").send(r.toString());
 });
@@ -1049,12 +1076,12 @@ app.all("/player-save-router", async (req, res) => {
 
     if (d === "1") {
         await updateUser(phone, { $addToSet: { likes: currentTitle } });
-        await playSay(r, "Saved to favorites.", user.settings);
+        await playSay(r, "נשמר במועדפים.", user.settings);
     } else if (d === "2") {
         const names = Object.keys(user.playlists || {});
         if (names.length) {
             await updateUser(phone, { $addToSet: { [`playlists.${names[0]}`]: currentTitle } });
-            await playSay(r, `Added to ${names[0]}.`, user.settings);
+            await playSay(r, `נוסף לפלייליסט ${names[0]}.`, user.settings);
         }
     }
     r.redirect(`${CONFIG.BASE_URL}/media-player-play`);
@@ -1066,7 +1093,7 @@ app.all("/player-volume-menu", async (req, res) => {
     const r = new VoiceResponse();
     const user = await getUser(req.body.From);
     const g = r.gather({ input: "dtmf", numDigits: 1, action: `${CONFIG.BASE_URL}/player-volume-router`, timeout: 5 });
-    await playSay(g, "Volume. Press 4 for softer. 6 for louder.", user.settings);
+    await playSay(g, "ווליום. 4 להחלשה. 6 להגברה.", user.settings);
     r.redirect(`${CONFIG.BASE_URL}/media-player-play`);
     res.type("text/xml").send(r.toString());
 });
@@ -1089,7 +1116,6 @@ app.all("/media-player-finished", (req, res) => {
     const session = getCall(req.body.CallSid);
     const p = session.player;
 
-    // Handle playlist auto-advance
     if (p.playlist.length && p.playlistIdx < p.playlist.length - 1) {
         p.playlistIdx++;
         p.title = p.playlist[p.playlistIdx];
@@ -1103,13 +1129,13 @@ app.all("/media-player-finished", (req, res) => {
 });
 
 // ==============================================================================
-// 🎙️ SYSTEM 3: ISRAELI PODCASTS (DIRECT CDN STREAMING)
+// 🎙️ SYSTEM 3: PODCASTS (HEBREW MENU & DIRECT STREAMING)
 // ==============================================================================
 app.all("/podcast-menu", async (req, res) => {
     const r = new VoiceResponse();
     const user = await getUser(req.body.From);
-    let msg = "Podcasts. ";
-    PODCAST_REGISTRY.forEach((p) => { msg += `Press ${p.id} for ${p.name}. `; });
+    let msg = "פודקאסטים. ";
+    PODCAST_REGISTRY.forEach((p) => { msg += `הקש ${p.id} עבור ${p.name}. `; });
 
     const g = r.gather({ input: "dtmf", numDigits: 1, action: `${CONFIG.BASE_URL}/podcast-episodes-browser`, timeout: 8 });
     await playSay(g, msg, user.settings);
@@ -1121,10 +1147,10 @@ app.all("/podcast-episodes-browser", async (req, res) => {
     const r = new VoiceResponse();
     const user = await getUser(req.body.From);
     const podId = parseInt(req.body.Digits);
-    const podData = await podcastsCol.findOne({ podcastId: podId });
+    const podData = await podcastsCol?.findOne({ podcastId: podId });
 
-    if (!podData || !podData.episodes?.length) {
-        await playSay(r, "Episodes currently updating. Please re-check shortly.", user.settings);
+    if (!podData?.episodes?.length) {
+        await playSay(r, "טוען פרקים, אנא נסה שוב בעוד מספר שניות.", user.settings);
         r.redirect(`${CONFIG.BASE_URL}/podcast-menu`);
         return res.type("text/xml").send(r.toString());
     }
@@ -1144,13 +1170,13 @@ app.all("/podcast-turn-browser", async (req, res) => {
     const ep = session.browseList[session.browseIndex];
 
     const g = r.gather({ input: "dtmf", numDigits: 1, action: `${CONFIG.BASE_URL}/podcast-browse-action`, timeout: 9 });
-    await playSay(g, `${ep.title}. 5 to play. 4 newer. 6 older.`, user.settings);
-    
+    await playSay(g, `${ep.title}. הקש 5 להשמעה, 4 לחדש יותר, 6 לישן יותר.`, user.settings);
+
     r.redirect(`${CONFIG.BASE_URL}/podcast-menu`);
     res.type("text/xml").send(r.toString());
 });
 
-app.all("/podcast-browse-action", async (req, res) => {
+app.all("/podcast-browse-action", (req, res) => {
     const r = new VoiceResponse();
     const d = req.body.Digits;
     const session = getCall(req.body.CallSid);
@@ -1158,18 +1184,19 @@ app.all("/podcast-browse-action", async (req, res) => {
     if (d === "5") {
         const ep = session.browseList[session.browseIndex];
         const p = session.player;
-        p.url = ep.enclosureUrl; // Direct streaming via FFmpeg
+        p.url = ep.enclosureUrl;
         p.title = ep.title;
         p.isPodcast = true;
         p.offset = 0;
         p.volume = 1.0;
         p.isPaused = false;
+        console.log(`🎙️ [PODCAST] Streaming: "${ep.title}" -> ${ep.enclosureUrl}`);
         r.redirect(`${CONFIG.BASE_URL}/media-player-play`);
-    } else if (d === "4") {
-        if (session.browseIndex > 0) session.browseIndex--;
+    } else if (d === "4" && session.browseIndex > 0) {
+        session.browseIndex--;
         r.redirect(`${CONFIG.BASE_URL}/podcast-turn-browser`);
-    } else if (d === "6") {
-        if (session.browseIndex < session.browseList.length - 1) session.browseIndex++;
+    } else if (d === "6" && session.browseIndex < session.browseList.length - 1) {
+        session.browseIndex++;
         r.redirect(`${CONFIG.BASE_URL}/podcast-turn-browser`);
     } else {
         r.redirect(`${CONFIG.BASE_URL}/podcast-menu`);
@@ -1178,11 +1205,12 @@ app.all("/podcast-browse-action", async (req, res) => {
 });
 
 // ==============================================================================
-// 📰 SYSTEM 4: YNET BREAKING NEWS ("MIVZAKIM")
+// 📰 SYSTEM 4: YNET BREAKING NEWS ("MIVZAKIM" IN HEBREW)
 // ==============================================================================
 app.all("/news-init", async (req, res) => {
     const r = new VoiceResponse();
     const user = await getUser(req.body.From);
+    console.log("📰 [NEWS] Fetching Ynet Mivzakim feed...");
     try {
         const feed = await rssParser.parseURL("https://www.ynet.co.il/Integration/StoryRss3082.xml");
         const session = getCall(req.body.CallSid);
@@ -1190,8 +1218,9 @@ app.all("/news-init", async (req, res) => {
         session.browseIndex = 0;
 
         r.redirect(`${CONFIG.BASE_URL}/news-reader`);
-    } catch {
-        await playSay(r, "Could not fetch breaking news.", user.settings);
+    } catch (e) {
+        console.error("❌ [NEWS ERROR]:", e.message);
+        await playSay(r, "טעינת המבזקים נכשלה.", user.settings);
         r.redirect(`${CONFIG.BASE_URL}/twiml`);
     }
     res.type("text/xml").send(r.toString());
@@ -1203,15 +1232,15 @@ app.all("/news-reader", async (req, res) => {
     const user = await getUser(req.body.From);
 
     if (!session.browseList?.length) {
-        await playSay(r, "No news items available.", user.settings);
+        await playSay(r, "אין מבזקים זמינים כרגע.", user.settings);
         r.redirect(`${CONFIG.BASE_URL}/twiml`);
         return res.type("text/xml").send(r.toString());
     }
 
     const item = session.browseList[session.browseIndex];
     const g = r.gather({ input: "dtmf", numDigits: 1, action: `${CONFIG.BASE_URL}/news-action`, timeout: 9 });
-    await playSay(g, `Mivzak. ${item.title}. Press 6 for older. 4 for newer. 8 for full details.`, user.settings);
-    
+    await playSay(g, `מבזק. ${item.title}. הקש 6 למבזק הבא, 4 למבזק הקודם, 8 לפרטים מלאים, כוכבית לתפריט הראשי.`, user.settings);
+
     r.redirect(`${CONFIG.BASE_URL}/twiml`);
     res.type("text/xml").send(r.toString());
 });
@@ -1222,19 +1251,18 @@ app.all("/news-action", async (req, res) => {
     const session = getCall(req.body.CallSid);
     const user = await getUser(req.body.From);
 
-    if (d === "6") {
-        if (session.browseIndex < session.browseList.length - 1) session.browseIndex++;
+    if (d === "6" && session.browseIndex < session.browseList.length - 1) {
+        session.browseIndex++;
         r.redirect(`${CONFIG.BASE_URL}/news-reader`);
-    } else if (d === "4") {
-        if (session.browseIndex > 0) session.browseIndex--;
+    } else if (d === "4" && session.browseIndex > 0) {
+        session.browseIndex--;
         r.redirect(`${CONFIG.BASE_URL}/news-reader`);
     } else if (d === "8") {
-        // Detailed Info: Author, Date & Full Content
         const item = session.browseList[session.browseIndex];
         const dateStr = item.pubDate ? new Date(item.pubDate).toLocaleTimeString("he-IL", { hour: "2-digit", minute: "2-digit" }) : "";
-        const author = item.creator || item.author || "כתב ynet";
-        const cleanContent = (item.contentSnippet || item.content || "אין פירוט נוסף").replace(/<[^>]*>/g, "");
-        const details = `פורסם בשעה ${dateStr} על ידי ${author}. ${cleanContent}`;
+        const author = item.creator || item.author || "כתב ווינט";
+        const cleanContent = (item.contentSnippet || item.content || "אין פירוט נוסף").replace(/<[^>]*>/g, "").trim();
+        const details = `פורסם בשעה ${dateStr} על ידי ${author}. ${cleanContent}. הקש 4 או 6 כדי להמשיך למבזקים אחרים.`;
 
         await playSay(r, details, user.settings);
         r.redirect(`${CONFIG.BASE_URL}/news-reader`);
@@ -1245,11 +1273,11 @@ app.all("/news-action", async (req, res) => {
 });
 
 // ------------------------------------------------------------------------------
-// 🛡️ SERVER CRASH GUARDS & LISTENER
+// 🛡️ SERVER CRASH GUARDS
 // ------------------------------------------------------------------------------
-process.on("uncaughtException", (err) => console.error("Caught Exception:", err));
-process.on("unhandledRejection", (reason) => console.error("Unhandled Rejection:", reason));
+process.on("uncaughtException", (err) => console.error("💥 [FATAL CRASH]:", err));
+process.on("unhandledRejection", (reason) => console.error("💥 [UNHANDLED REJECTION]:", reason));
 
 app.listen(CONFIG.PORT, () => {
-    console.log(`🚀 Voice OS v10.0 MASTER LIVE on port ${CONFIG.PORT}`);
+    console.log(`🚀 [SYSTEM ONLINE] Voice OS Master v10.5 ENTERPRISE on port ${CONFIG.PORT}`);
 });
