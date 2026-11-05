@@ -1,6 +1,6 @@
 import { spawn } from "child_process";
 import twilio from "twilio";
-import { CONFIG, isHebrewText } from "../config.js";
+import { CONFIG } from "../config.js";
 import { gatherPlayOrSay, playInterruptible } from "./tts.js";
 import { saveLikedSong, addToPlaylist, getUser } from "../db.js";
 
@@ -55,9 +55,6 @@ export function handleStreamAudio(req, res) {
 
     ffmpegArgs.push("-i", fileUrl);
 
-    // CRITICAL FIX: Re-encode to libmp3lame with telephony format (16kHz mono).
-    // This resets Presentation Timestamps (PTS) to 0 at the seek point, ensuring
-    // Twilio's audio player plays seamlessly from the exact requested second.
     if (volume !== 1.0) {
         ffmpegArgs.push("-filter:a", `volume=${volume}`);
     }
@@ -118,13 +115,11 @@ export async function handlePlayerPlay(req, res) {
     }
 
     session.startTime = Date.now();
-    // Unique cache-busting timestamp query parameter so Twilio never serves a cached segment
     const cb = Date.now();
     const streamUrl = `${CONFIG.BASE_URL}/stream-audio?url=${encodeURIComponent(session.fileUrl)}&offset=${session.offset}&volume=${session.volume || 1.0}&_cb=${cb}`;
 
     console.log(`[Player] ▶️ [Call: ${req.body.CallSid}] Playing "${session.title}" from ${session.offset.toFixed(1)}s`);
 
-    // Gather wraps Play so any DTMF key immediately sends action to /player-action
     const g = r.gather({
         input: "dtmf",
         numDigits: 1,
@@ -134,7 +129,7 @@ export async function handlePlayerPlay(req, res) {
     });
     g.play(streamUrl);
 
-    // If song/podcast finishes completely without interruption:
+    // If song/podcast finishes naturally without interruption:
     const finishMsg = isEn ? "Finished. Press 8 to save, or Star for menu." : "ההשמעה הסתיימה. לחץ 8 לשמירה, או כוכבית לתפריט.";
     await gatherPlayOrSay(
         r,
@@ -161,7 +156,6 @@ export async function handlePlayerAction(req, res) {
 
     const oldOffset = session.offset;
 
-    // Update offset with elapsed playback time
     if (!session.isPaused && session.startTime) {
         const elapsed = (Date.now() - session.startTime) / 1000;
         session.offset = Math.max(0, session.offset + elapsed);
@@ -175,7 +169,6 @@ export async function handlePlayerAction(req, res) {
     }
 
     if (key === "5") {
-        // Toggle Pause / Play
         session.isPaused = !session.isPaused;
         console.log(`[Player] ⏯️ [Call: ${req.body.CallSid}] Key 5 pressed: Pause toggled -> isPaused=${session.isPaused} at ${session.offset.toFixed(1)}s`);
         r.redirect(`${CONFIG.BASE_URL}/player-play`);
@@ -183,41 +176,36 @@ export async function handlePlayerAction(req, res) {
     }
 
     if (key === "1") {
-        // 20 sec backward
         session.offset = Math.max(0, session.offset - 20);
-        console.log(`[Player] ⏪ [Call: ${req.body.CallSid}] Key 1 pressed: Rewind 20s (was ${oldOffset.toFixed(1)}s, now ${session.offset.toFixed(1)}s)`);
+        console.log(`[Player] ⏪ [Call: ${req.body.CallSid}] Key 1: Rewind 20s (was ${oldOffset.toFixed(1)}s, now ${session.offset.toFixed(1)}s)`);
         r.redirect(`${CONFIG.BASE_URL}/player-play`);
         return res.type("text/xml").send(r.toString());
     }
 
     if (key === "3") {
-        // 20 sec forward
         session.offset += 20;
-        console.log(`[Player] ⏩ [Call: ${req.body.CallSid}] Key 3 pressed: Forward 20s (was ${oldOffset.toFixed(1)}s, now ${session.offset.toFixed(1)}s)`);
+        console.log(`[Player] ⏩ [Call: ${req.body.CallSid}] Key 3: Forward 20s (was ${oldOffset.toFixed(1)}s, now ${session.offset.toFixed(1)}s)`);
         r.redirect(`${CONFIG.BASE_URL}/player-play`);
         return res.type("text/xml").send(r.toString());
     }
 
     if (key === "4") {
-        // 1 min back for music, 5 min back for podcast
         const jump = session.type === "podcast" ? 300 : 60;
         session.offset = Math.max(0, session.offset - jump);
-        console.log(`[Player] ⏮️ [Call: ${req.body.CallSid}] Key 4 pressed: Jump back ${jump}s (was ${oldOffset.toFixed(1)}s, now ${session.offset.toFixed(1)}s)`);
+        console.log(`[Player] ⏮️ [Call: ${req.body.CallSid}] Key 4: Jump back ${jump}s (was ${oldOffset.toFixed(1)}s, now ${session.offset.toFixed(1)}s)`);
         r.redirect(`${CONFIG.BASE_URL}/player-play`);
         return res.type("text/xml").send(r.toString());
     }
 
     if (key === "6") {
-        // 1 min forward for music, 5 min forward for podcast
         const jump = session.type === "podcast" ? 300 : 60;
         session.offset += jump;
-        console.log(`[Player] ⏭️ [Call: ${req.body.CallSid}] Key 6 pressed: Jump forward ${jump}s (was ${oldOffset.toFixed(1)}s, now ${session.offset.toFixed(1)}s)`);
+        console.log(`[Player] ⏭️ [Call: ${req.body.CallSid}] Key 6: Jump forward ${jump}s (was ${oldOffset.toFixed(1)}s, now ${session.offset.toFixed(1)}s)`);
         r.redirect(`${CONFIG.BASE_URL}/player-play`);
         return res.type("text/xml").send(r.toString());
     }
 
     if (key === "2") {
-        // Volume adjustment sub-menu
         console.log(`[Player] 🔊 [Call: ${req.body.CallSid}] Key 2 pressed: Opening volume sub-menu`);
         const volPrompt = isEn 
             ? "Volume menu. Press 4 for louder, 6 for softer, 5 to resume."
@@ -235,7 +223,6 @@ export async function handlePlayerAction(req, res) {
     }
 
     if (key === "8") {
-        // Save sub-menu
         console.log(`[Player] ⭐ [Call: ${req.body.CallSid}] Key 8 pressed: Opening save sub-menu`);
         const savePrompt = isEn
             ? "Save menu. Press 1 for favorites, 2 for playlists, Star to cancel."
@@ -252,7 +239,6 @@ export async function handlePlayerAction(req, res) {
         return res.type("text/xml").send(r.toString());
     }
 
-    // Default: resume playing
     r.redirect(`${CONFIG.BASE_URL}/player-play`);
     res.type("text/xml").send(r.toString());
 }
@@ -305,5 +291,40 @@ export async function handlePlayerSave(req, res) {
     }
 
     r.redirect(`${CONFIG.BASE_URL}/player-play`);
+    res.type("text/xml").send(r.toString());
+}
+
+/**
+ * Post-finish Action Handler (when song or podcast ends naturally and user presses 8)
+ */
+export async function handlePlayerPostFinish(req, res) {
+    const r = new VoiceResponse();
+    const session = getPlayerSession(req.body.CallSid);
+    const phone = req.body.From;
+    const user = await getUser(phone);
+    const isEn = user.settings?.language !== "he";
+    const key = req.body.Digits;
+
+    console.log(`[Player] 🏁 [Call: ${req.body.CallSid}] Post-finish action received. Key: "${key}"`);
+
+    if (key === "8") {
+        if (session.title) {
+            await saveLikedSong(phone, session.title);
+            console.log(`[Player] ❤️ [Call: ${req.body.CallSid}] Saved track to favorites: "${session.title}"`);
+            const msg = isEn ? "Song saved to favorites." : "השיר נשמר במועדפים.";
+            await playInterruptible(r, msg, `${CONFIG.BASE_URL}/twiml`, {
+                voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice
+            });
+        }
+        r.redirect(`${CONFIG.BASE_URL}/twiml`);
+        return res.type("text/xml").send(r.toString());
+    }
+
+    if (key === "*") {
+        r.redirect(`${CONFIG.BASE_URL}/twiml`);
+        return res.type("text/xml").send(r.toString());
+    }
+
+    r.redirect(`${CONFIG.BASE_URL}/twiml`);
     res.type("text/xml").send(r.toString());
 }

@@ -69,16 +69,17 @@ router.all("/menu-action", async (req, res) => {
 
     if (key === "1") {
         // Search song via voice recording
-        const speakPrompt = isEn ? "Say the song name or artist after the beep." : "אמור את שם השיר או האמן לאחר הצפצוף.";
+        const speakPrompt = isEn ? "Say the song name or artist after the beep, then press pound." : "אמור את שם השיר או האמן לאחר הצפצוף, ולחץ סולמית.";
         await playInterruptible(r, speakPrompt, `${CONFIG.BASE_URL}/music/record-search`, {
             voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice
         });
         r.record({
             action: `${CONFIG.BASE_URL}/music/process-search`,
             method: "POST",
-            maxLength: 15,
+            maxLength: 30,
             playBeep: true,
-            timeout: 3
+            timeout: 15,
+            finishOnKey: "#"
         });
         return res.type("text/xml").send(r.toString());
     }

@@ -82,7 +82,7 @@ router.all("/menu-action", async (req, res) => {
         session.activeTurns = [];
         session.currentTurnIndex = 0;
 
-        const speakPrompt = isEn ? "Speak after the tone." : "דבר לאחר הצפצוף.";
+        const speakPrompt = isEn ? "Speak after the tone. Press pound when finished." : "דבר לאחר הצפצוף, ולחץ סולמית לסיום.";
         await playInterruptible(r, speakPrompt, `${CONFIG.BASE_URL}/chat/record-prompt`, {
             voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice
         });
@@ -91,7 +91,8 @@ router.all("/menu-action", async (req, res) => {
             method: "POST",
             maxLength: 300,
             playBeep: true,
-            timeout: 5
+            timeout: 15,
+            finishOnKey: "#"
         });
         return res.type("text/xml").send(r.toString());
     }
@@ -113,7 +114,7 @@ router.all("/menu-action", async (req, res) => {
         session.activeTurns = [...history];
         session.currentTurnIndex = Math.max(0, history.length - 1);
 
-        const resumePrompt = isEn ? "Resuming previous chat. Speak after the tone." : "ממשיך שיחה קודמת. דבר לאחר הצפצוף.";
+        const resumePrompt = isEn ? "Resuming previous chat. Speak after the tone, and press pound when finished." : "ממשיך שיחה קודמת. דבר לאחר הצפצוף, ולחץ סולמית לסיום.";
         await playInterruptible(r, resumePrompt, `${CONFIG.BASE_URL}/chat/record-prompt`, {
             voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice
         });
@@ -122,7 +123,8 @@ router.all("/menu-action", async (req, res) => {
             method: "POST",
             maxLength: 300,
             playBeep: true,
-            timeout: 5
+            timeout: 15,
+            finishOnKey: "#"
         });
         return res.type("text/xml").send(r.toString());
     }
@@ -269,7 +271,7 @@ router.all("/post-reply-action", async (req, res) => {
 
     if (key === "1") {
         // Continue chat
-        const speakPrompt = isEn ? "Speak after the tone." : "דבר לאחר הצפצוף.";
+        const speakPrompt = isEn ? "Speak after the tone. Press pound when finished." : "דבר לאחר הצפצוף, ולחץ סולמית לסיום.";
         await playInterruptible(r, speakPrompt, `${CONFIG.BASE_URL}/chat/record-prompt`, {
             voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice
         });
@@ -278,7 +280,8 @@ router.all("/post-reply-action", async (req, res) => {
             method: "POST",
             maxLength: 300,
             playBeep: true,
-            timeout: 5
+            timeout: 15,
+            finishOnKey: "#"
         });
         return res.type("text/xml").send(r.toString());
     }
@@ -408,7 +411,7 @@ router.all("/saved-action", async (req, res) => {
                 await saveChatHistory(caller, t.role, t.parts[0]?.text);
             }
             session.activeTurns = [...target.turns];
-            const speakPrompt = isEn ? "Resuming saved conversation. Speak after the tone." : "ממשיך שיחה זו. דבר לאחר הצפצוף.";
+            const speakPrompt = isEn ? "Resuming saved conversation. Speak after the tone, and press pound when finished." : "ממשיך שיחה זו. דבר לאחר הצפצוף, ולחץ סולמית לסיום.";
             await playInterruptible(r, speakPrompt, `${CONFIG.BASE_URL}/chat/record-prompt`, {
                 voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice
             });
@@ -417,7 +420,8 @@ router.all("/saved-action", async (req, res) => {
                 method: "POST",
                 maxLength: 300,
                 playBeep: true,
-                timeout: 5
+                timeout: 15,
+                finishOnKey: "#"
             });
             return res.type("text/xml").send(r.toString());
         }

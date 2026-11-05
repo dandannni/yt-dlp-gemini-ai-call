@@ -24,7 +24,7 @@ export function getDefaultUserData(phone) {
             model: "gemini-2.5-flash",
             hebrew_voice: "he-IL-HilaNeural",
             english_voice: "en-US-ChristopherNeural",
-            search_engine: "scsearch1:",
+            search_engine: "ytsearch1:", // Default to YouTube search
             tts_speed: "+0%",
             system_prompt_preset: "default"
         },
@@ -95,6 +95,7 @@ export async function getUser(phone) {
             }
             if (!doc.settings) doc.settings = {};
             if (!doc.settings.language) doc.settings.language = "en";
+            if (!doc.settings.search_engine) doc.settings.search_engine = "ytsearch1:";
             localCache.users[phone] = doc;
             return doc;
         } catch (e) {
@@ -110,6 +111,7 @@ export async function getUser(phone) {
     const localUser = localCache.users[phone];
     if (!localUser.settings) localUser.settings = {};
     if (!localUser.settings.language) localUser.settings.language = "en";
+    if (!localUser.settings.search_engine) localUser.settings.search_engine = "ytsearch1:";
     return localUser;
 }
 

@@ -7,6 +7,7 @@ import path from "path";
 import fs from "fs";
 import { CONFIG } from "./src/config.js";
 import { initDB } from "./src/db.js";
+import { warmupStaticPrompts } from "./src/services/tts.js";
 
 // Core Services
 import {
@@ -14,7 +15,8 @@ import {
     handlePlayerPlay,
     handlePlayerAction,
     handlePlayerVolume,
-    handlePlayerSave
+    handlePlayerSave,
+    handlePlayerPostFinish
 } from "./src/services/player.js";
 
 // Route Modules
@@ -75,9 +77,7 @@ app.all("/player-play", handlePlayerPlay);
 app.all("/player-action", handlePlayerAction);
 app.all("/player-volume-action", handlePlayerVolume);
 app.all("/player-save-menu", handlePlayerSave);
-app.all("/player-post-finish", (req, res) => {
-    res.redirect(`${CONFIG.BASE_URL}/twiml`);
-});
+app.all("/player-post-finish", handlePlayerPostFinish);
 
 // ------------------------------------------------------------------------------
 // Mount Modular IVR Subsystems
@@ -103,6 +103,7 @@ async function startServer() {
         console.log(`🚀 Voice OS v10.0 running on Port ${CONFIG.PORT}`);
         console.log(`🌐 Base URL: ${CONFIG.BASE_URL}`);
         console.log(`====================================================`);
+        warmupStaticPrompts().catch(() => {});
     });
 }
 
