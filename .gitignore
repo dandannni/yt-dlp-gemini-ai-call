@@ -1,16 +1,23 @@
 # Dependencies
 node_modules/
 
-# Environment variables (SECURITY RISK if you upload this!)
+# Environment variables & sensitive credentials (SECURITY RISK!)
 .env
+*.env
+atlas-credentials.env
+accounts.txt
+bot_database.json
+*.log
 
 # System files
 .DS_Store
 Thumbs.db
-
-# Logs
 npm-debug.log*
 
-# Downloaded music files (keep your repo clean)
+# Local notes/backups
+*.txt
+
+# Downloaded music & audio files
 *.mp3
 public/*.mp3
+/tmp/*
