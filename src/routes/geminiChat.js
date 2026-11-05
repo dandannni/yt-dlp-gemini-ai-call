@@ -173,21 +173,36 @@ router.all("/process-speech", async (req, res) => {
         return res.type("text/xml").send(r.toString());
     }
 
-    console.log(`[Chat] 🎙️ [Call: ${req.body.CallSid}] Speech recording received: ${recordingUrl}`);
+    let queryText = req.body.SpeechResult || null;
 
-    let base64Audio = null;
-    try {
-        const authHeader = "Basic " + Buffer.from(`${CONFIG.TWILIO_ACCOUNT_SID}:${CONFIG.TWILIO_AUTH_TOKEN}`).toString("base64");
-        const fetchRes = await fetch(recordingUrl + ".mp3", { headers: { Authorization: authHeader } });
-        if (fetchRes.ok) {
-            base64Audio = Buffer.from(await fetchRes.arrayBuffer()).toString("base64");
+    if (!queryText && recordingUrl) {
+        console.log(`[Chat] 🎙️ [Call: ${req.body.CallSid}] Speech recording received: ${recordingUrl}`);
+        let base64Audio = null;
+        try {
+            const authHeader = "Basic " + Buffer.from(`${CONFIG.TWILIO_ACCOUNT_SID}:${CONFIG.TWILIO_AUTH_TOKEN}`).toString("base64");
+            const fetchRes = await fetch(recordingUrl + ".mp3", { headers: { Authorization: authHeader } });
+            if (fetchRes.ok) {
+                base64Audio = Buffer.from(await fetchRes.arrayBuffer()).toString("base64");
+            }
+        } catch (e) {
+            console.error(`[Chat] ❌ Fetch recording error:`, e.message);
         }
-    } catch (e) {
-        console.error(`[Chat] ❌ Fetch recording error:`, e.message);
+
+        const intentData = base64Audio ? await analyzeAudioIntent(base64Audio) : null;
+        if (intentData && intentData.query) {
+            queryText = intentData.query;
+        }
     }
 
-    const intentData = base64Audio ? await analyzeAudioIntent(base64Audio) : null;
-    const queryText = intentData?.query || (isEn ? "Hello" : "שלום");
+    if (!queryText) {
+        console.warn(`[Chat] ⚠️ [Call: ${req.body.CallSid}] Could not transcribe user speech`);
+        const noSpeechMsg = isEn ? "Could not understand speech. Please try again." : "לא הצלחתי לזהות דיבור. אנא נסה שוב.";
+        await playInterruptible(r, noSpeechMsg, `${CONFIG.BASE_URL}/chat/menu`, {
+            voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice
+        });
+        r.redirect(`${CONFIG.BASE_URL}/chat/menu`);
+        return res.type("text/xml").send(r.toString());
+    }
 
     console.log(`[Chat] 🧠 [Call: ${req.body.CallSid}] Query recognized: "${queryText}" (Intent: ${intentData?.intent || "chat"})`);
 

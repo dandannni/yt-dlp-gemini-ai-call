@@ -38,6 +38,9 @@ const ROUTER_TOOL = {
     }]
 };
 
+// High-quota models (1,500 requests/day each)
+const FAST_MODELS = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-2.5-flash"];
+
 /**
  * Direct Audio -> Intent + Query using Gemini Multimodal Function Calling
  */
@@ -50,25 +53,32 @@ export async function analyzeAudioIntent(base64Audio) {
     console.log(`[Gemini] 🧠 Routing audio intent using Gemini...`);
 
     for (const key of CONFIG.GEMINI_KEYS) {
-        try {
-            const genAI = new GoogleGenerativeAI(key);
-            const model = genAI.getGenerativeModel({
-                model: "gemini-2.5-flash",
-                tools: [ROUTER_TOOL],
-                systemInstruction: ROUTER_PROMPT
-            });
+        const genAI = new GoogleGenerativeAI(key);
 
-            const result = await model.generateContent([
-                { inlineData: { mimeType: "audio/mp3", data: base64Audio } }
-            ]);
+        for (const modelName of FAST_MODELS) {
+            try {
+                const model = genAI.getGenerativeModel({
+                    model: modelName,
+                    tools: [ROUTER_TOOL],
+                    systemInstruction: ROUTER_PROMPT
+                });
 
-            const call = result.response.functionCalls()?.[0];
-            if (call && call.name === "route_request") {
-                console.log(`[Gemini] 🎯 Audio Intent: "${call.args.intent}", Query: "${call.args.query}"`);
-                return call.args;
+                const result = await model.generateContent([
+                    { inlineData: { mimeType: "audio/mp3", data: base64Audio } }
+                ]);
+
+                const call = result.response.functionCalls()?.[0];
+                if (call && call.name === "route_request") {
+                    console.log(`[Gemini] 🎯 Audio Intent via ${modelName}: "${call.args.intent}", Query: "${call.args.query}"`);
+                    return call.args;
+                }
+            } catch (e) {
+                if (e.message.includes("429")) {
+                    console.warn(`[Gemini] ⚠️ Quota 429 on model ${modelName}. Trying next model...`);
+                    continue; // Try next high-quota model
+                }
+                console.error(`[Gemini] ❌ Router error (${modelName}):`, e.message.slice(0, 80));
             }
-        } catch (e) {
-            console.error("[Gemini] ❌ Router error with key:", e.message);
         }
     }
     return null;
@@ -82,40 +92,47 @@ export async function chatWithGemini(phone, userInputText, customHistory = null)
     const isEn = user.settings?.language !== "he";
     const presetKey = user.settings?.system_prompt_preset || "default";
     const systemPrompt = SYSTEM_PRESETS[presetKey] || SYSTEM_PRESETS.default;
-    const modelName = user.settings?.model || "gemini-2.5-flash";
+    const preferredModel = user.settings?.model || "gemini-1.5-flash";
 
     await saveChatHistory(phone, "user", userInputText);
     const history = customHistory || (await getUser(phone)).chat_history || [];
 
-    console.log(`[Gemini] 💬 Chatting with "${modelName}" for: "${userInputText}" (Lang: ${isEn ? "English" : "Hebrew"})`);
+    const modelsToTry = [preferredModel, ...FAST_MODELS.filter(m => m !== preferredModel)];
 
     for (const key of CONFIG.GEMINI_KEYS) {
-        try {
-            const genAI = new GoogleGenerativeAI(key);
-            const model = genAI.getGenerativeModel({
-                model: modelName,
-                tools: [{ googleSearch: {} }],
-                systemInstruction: systemPrompt
-            });
+        const genAI = new GoogleGenerativeAI(key);
 
-            // Feed history except the last prompt which is sent via sendMessage
-            const prevTurns = history.slice(0, -1);
-            const chat = model.startChat({ history: prevTurns });
+        for (const modelName of modelsToTry) {
+            try {
+                const model = genAI.getGenerativeModel({
+                    model: modelName,
+                    tools: [{ googleSearch: {} }],
+                    systemInstruction: systemPrompt
+                });
 
-            const result = await chat.sendMessage(userInputText);
-            const replyText = result.response.text().replace(/[*_#`]/g, "").trim();
+                const prevTurns = history.slice(0, -1);
+                const chat = model.startChat({ history: prevTurns });
 
-            console.log(`[Gemini] ✅ Reply generated (${replyText.length} chars)`);
-            await saveChatHistory(phone, "model", replyText);
-            return replyText;
-        } catch (e) {
-            console.error("[Gemini] ❌ Chat error with key:", e.message);
+                console.log(`[Gemini] 💬 Chatting with "${modelName}" for: "${userInputText}"`);
+                const result = await chat.sendMessage(userInputText);
+                const replyText = result.response.text().replace(/[*_#`]/g, "").trim();
+
+                console.log(`[Gemini] ✅ Reply generated from ${modelName} (${replyText.length} chars)`);
+                await saveChatHistory(phone, "model", replyText);
+                return replyText;
+            } catch (e) {
+                if (e.message.includes("429")) {
+                    console.warn(`[Gemini] ⚠️ 429 Quota on ${modelName}. Trying fallback model...`);
+                    continue;
+                }
+                console.error(`[Gemini] ❌ Chat error (${modelName}):`, e.message.slice(0, 80));
+            }
         }
     }
 
     return isEn 
-        ? "I apologize, I encountered a connection issue. Please try again in a moment."
-        : "סליחה, נתקלתי בבעיה בחיבור. אנא נסה שוב בעוד רגע.";
+        ? "I apologize, I encountered a temporary network issue. Please ask again in a moment."
+        : "סליחה, נתקלתי בבעיה זמנית בחיבור. אנא נסה שוב בעוד רגע.";
 }
 
 /**
@@ -123,21 +140,27 @@ export async function chatWithGemini(phone, userInputText, customHistory = null)
  */
 export async function summarizeChatSoFar(phone) {
     const user = await getUser(phone);
+    const isEn = user.settings?.language !== "he";
     const history = user.chat_history || [];
-    if (history.length === 0) return "אין עדיין היסטוריית שיחה לסכם.";
+    if (history.length === 0) {
+        return isEn ? "There is no conversation history to summarize yet." : "אין עדיין היסטוריית שיחה לסכם.";
+    }
 
     for (const key of CONFIG.GEMINI_KEYS) {
-        try {
-            const genAI = new GoogleGenerativeAI(key);
-            const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
-            const prompt = `סכם במשפט או שניים קצרים וברורים בעברית את עיקרי השיחה שהתקיימה עד כה:
-${JSON.stringify(history)}`;
+        const genAI = new GoogleGenerativeAI(key);
+        for (const modelName of FAST_MODELS) {
+            try {
+                const model = genAI.getGenerativeModel({ model: modelName });
+                const prompt = isEn
+                    ? `Summarize the key points of this phone conversation in 1-2 clear, spoken sentences:\n${JSON.stringify(history)}`
+                    : `סכם במשפט או שניים קצרים וברורים בעברית את עיקרי השיחה שהתקיימה עד כה:\n${JSON.stringify(history)}`;
 
-            const result = await model.generateContent(prompt);
-            return result.response.text().replace(/[*_#`]/g, "").trim();
-        } catch (e) {
-            console.error("Summary error:", e.message);
+                const result = await model.generateContent(prompt);
+                return result.response.text().replace(/[*_#`]/g, "").trim();
+            } catch (e) {
+                continue;
+            }
         }
     }
-    return "לא הצלחתי לסכם כרגע.";
+    return isEn ? "Could not generate summary." : "לא הצלחתי לסכם כרגע.";
 }

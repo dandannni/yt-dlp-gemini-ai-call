@@ -95,7 +95,9 @@ export async function getUser(phone) {
             }
             if (!doc.settings) doc.settings = {};
             if (!doc.settings.language) doc.settings.language = "en";
-            if (!doc.settings.search_engine) doc.settings.search_engine = "ytsearch1:";
+            if (!doc.settings.search_engine || doc.settings.search_engine.startsWith("scsearch")) {
+                doc.settings.search_engine = "ytsearch1:";
+            }
             localCache.users[phone] = doc;
             return doc;
         } catch (e) {
@@ -111,7 +113,9 @@ export async function getUser(phone) {
     const localUser = localCache.users[phone];
     if (!localUser.settings) localUser.settings = {};
     if (!localUser.settings.language) localUser.settings.language = "en";
-    if (!localUser.settings.search_engine) localUser.settings.search_engine = "ytsearch1:";
+    if (!localUser.settings.search_engine || localUser.settings.search_engine.startsWith("scsearch")) {
+        localUser.settings.search_engine = "ytsearch1:";
+    }
     return localUser;
 }
 

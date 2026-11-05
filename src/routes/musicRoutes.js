@@ -150,27 +150,44 @@ router.all("/process-search", async (req, res) => {
         return res.type("text/xml").send(r.toString());
     }
 
-    let base64Audio = null;
-    try {
-        const authHeader = "Basic " + Buffer.from(`${CONFIG.TWILIO_ACCOUNT_SID}:${CONFIG.TWILIO_AUTH_TOKEN}`).toString("base64");
-        const fetchRes = await fetch(recordingUrl + ".mp3", { headers: { Authorization: authHeader } });
-        if (fetchRes.ok) {
-            base64Audio = Buffer.from(await fetchRes.arrayBuffer()).toString("base64");
+    let query = req.body.SpeechResult || null;
+    let isLong = false;
+
+    if (!query && recordingUrl) {
+        let base64Audio = null;
+        try {
+            const authHeader = "Basic " + Buffer.from(`${CONFIG.TWILIO_ACCOUNT_SID}:${CONFIG.TWILIO_AUTH_TOKEN}`).toString("base64");
+            const fetchRes = await fetch(recordingUrl + ".mp3", { headers: { Authorization: authHeader } });
+            if (fetchRes.ok) {
+                base64Audio = Buffer.from(await fetchRes.arrayBuffer()).toString("base64");
+            }
+        } catch (e) {
+            console.error(`[Music] ❌ Recording download error:`, e.message);
         }
-    } catch (e) {
-        console.error(`[Music] ❌ Recording download error:`, e.message);
+
+        const intentData = base64Audio ? await analyzeAudioIntent(base64Audio) : null;
+        if (intentData && intentData.query) {
+            query = intentData.query;
+            isLong = intentData.intent === "music_long";
+        }
     }
 
-    const intentData = base64Audio ? await analyzeAudioIntent(base64Audio) : null;
-    const query = intentData?.query || "popular music";
-    const isLong = intentData?.intent === "music_long";
+    if (!query) {
+        console.warn(`[Music] ⚠️ [Call: ${req.body.CallSid}] No speech recognized`);
+        const failMsg = isEn ? "Could not understand speech. Please try again." : "לא הצלחתי לזהות דיבור. אנא נסה שוב.";
+        await playInterruptible(r, failMsg, `${CONFIG.BASE_URL}/music/menu`, {
+            voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice
+        });
+        r.redirect(`${CONFIG.BASE_URL}/music/menu`);
+        return res.type("text/xml").send(r.toString());
+    }
 
-    console.log(`[Music] 🔍 [Call: ${req.body.CallSid}] Song search query recognized: "${query}" (Long: ${isLong})`);
+    console.log(`[Music] 🔍 [Call: ${req.body.CallSid}] Song search query: "${query}" (Long: ${isLong})`);
 
     await saveMusicHistory(caller, query);
     searchAndDownloadMusic(req.body.CallSid, query, {
         isLong,
-        engine: user.settings?.search_engine || "scsearch1:"
+        engine: user.settings?.search_engine || "ytsearch1:"
     });
 
     const searchPrompt = isEn ? `Finding ${query}...` : `מחפש את ${query}...`;
@@ -290,7 +307,7 @@ router.all("/browse-action", async (req, res) => {
         // Play selected item
         const selected = browse.list[browse.index];
         console.log(`[Music] ▶️ [Call: ${req.body.CallSid}] Selected item to play: "${selected}"`);
-        searchAndDownloadMusic(req.body.CallSid, selected, { engine: user.settings?.search_engine || "scsearch1:" });
+        searchAndDownloadMusic(req.body.CallSid, selected, { engine: user.settings?.search_engine || "ytsearch1:" });
         const playMsg = isEn ? `Playing ${selected}` : `מנגן את ${selected}`;
         await playInterruptible(r, playMsg, `${CONFIG.BASE_URL}/music/wait-loop`, {
             voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice
