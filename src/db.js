@@ -20,6 +20,7 @@ export function getDefaultUserData(phone) {
             "Favorites": []
         },
         settings: {
+            language: "en", // Default to English ('en' | 'he')
             model: "gemini-2.5-flash",
             hebrew_voice: "he-IL-HilaNeural",
             english_voice: "en-US-ChristopherNeural",
@@ -92,6 +93,8 @@ export async function getUser(phone) {
                 doc = getDefaultUserData(phone);
                 await usersCollection.insertOne(doc);
             }
+            if (!doc.settings) doc.settings = {};
+            if (!doc.settings.language) doc.settings.language = "en";
             localCache.users[phone] = doc;
             return doc;
         } catch (e) {
@@ -104,7 +107,10 @@ export async function getUser(phone) {
         localCache.users[phone] = getDefaultUserData(phone);
         saveLocalDB();
     }
-    return localCache.users[phone];
+    const localUser = localCache.users[phone];
+    if (!localUser.settings) localUser.settings = {};
+    if (!localUser.settings.language) localUser.settings.language = "en";
+    return localUser;
 }
 
 // Update user helper

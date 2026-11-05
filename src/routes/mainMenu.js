@@ -16,13 +16,19 @@ router.all("/twiml", async (req, res) => {
 
     // Caller whitelist verification
     if (CONFIG.VERIFIED_CALLERS.length > 0 && !CONFIG.VERIFIED_CALLERS.includes(caller)) {
-        console.warn(`Unauthorized call attempt from ${caller}`);
+        console.warn(`[Security] 🚫 Unauthorized call attempt from ${caller}`);
         r.reject();
         return res.type("text/xml").send(r.toString());
     }
 
     const user = await getUser(caller);
-    const menuPrompt = "שלום. 1 לשיחה עם בינה מלאכותית, 2 למוזיקה, 3 לפודקאסטים, 4 למבזקי חדשות ynet, או 0 להגדרות.";
+    const isEn = user.settings?.language !== "he"; // Default English
+
+    console.log(`[Menu] 📞 [Call: ${req.body.CallSid}] Main menu presented to ${caller} (Language: ${user.settings?.language || "en"})`);
+
+    const menuPrompt = isEn
+        ? "Welcome to Voice OS. Press 1 for AI Assistant, 2 for Music, 3 for Podcasts, 4 for News, or 0 for Settings."
+        : "שלום. 1 לשיחה עם בינה מלאכותית, 2 למוזיקה, 3 לפודקאסטים, 4 למבזקי חדשות, או 0 להגדרות.";
 
     await gatherPlayOrSay(
         r,
@@ -30,7 +36,7 @@ router.all("/twiml", async (req, res) => {
         `${CONFIG.BASE_URL}/main-menu-router`,
         1,
         8,
-        { voice: user.settings?.hebrew_voice }
+        { voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice }
     );
 
     // If caller didn't press a button, prompt once more or loop
@@ -44,6 +50,8 @@ router.all("/twiml", async (req, res) => {
 router.all("/main-menu-router", async (req, res) => {
     const r = new VoiceResponse();
     const digit = req.body.Digits;
+
+    console.log(`[Menu] 🔘 [Call: ${req.body.CallSid}] Main menu digit selected: "${digit}"`);
 
     switch (digit) {
         case "1":

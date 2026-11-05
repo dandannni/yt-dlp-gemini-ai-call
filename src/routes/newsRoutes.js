@@ -25,14 +25,22 @@ router.all("/menu", async (req, res) => {
     const session = getNewsSession(req.body.CallSid);
     const caller = req.body.From;
     const user = await getUser(caller);
+    const isEn = user.settings?.language !== "he";
+
+    console.log(`[News] 📰 [Call: ${req.body.CallSid}] Opening Ynet Breaking News (Lang: ${isEn ? "English" : "Hebrew"})`);
 
     const items = await getYnetMivzakim();
     if (!items || items.length === 0) {
-        await playInterruptible(r, "לא הצלחתי לטעון מבזקים כרגע.", `${CONFIG.BASE_URL}/twiml`, { voice: user.settings?.hebrew_voice });
+        console.warn(`[News] ⚠️ [Call: ${req.body.CallSid}] Could not fetch Ynet items`);
+        const errMsg = isEn ? "Could not load breaking news at this time." : "לא הצלחתי לטעון מבזקים כרגע.";
+        await playInterruptible(r, errMsg, `${CONFIG.BASE_URL}/twiml`, {
+            voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice
+        });
         r.redirect(`${CONFIG.BASE_URL}/twiml`);
         return res.type("text/xml").send(r.toString());
     }
 
+    console.log(`[News] ⚡ [Call: ${req.body.CallSid}] Loaded ${items.length} Ynet flash news items`);
     session.items = items;
     session.index = 0;
     r.redirect(`${CONFIG.BASE_URL}/news/read`);
@@ -47,6 +55,7 @@ router.all("/read", async (req, res) => {
     const session = getNewsSession(req.body.CallSid);
     const caller = req.body.From;
     const user = await getUser(caller);
+    const isEn = user.settings?.language !== "he";
 
     if (!session.items || session.items.length === 0) {
         r.redirect(`${CONFIG.BASE_URL}/twiml`);
@@ -54,8 +63,10 @@ router.all("/read", async (req, res) => {
     }
 
     const current = session.items[session.index];
-    const timePrefix = current.time ? `שעה ${current.time}. ` : "";
-    const prompt = `${timePrefix}${current.title}. לחץ 6 למבזק הבא, 4 לקודם, 8 לפרטים, כוכבית לתפריט.`;
+    const timePrefix = current.time ? (isEn ? `Time ${current.time}. ` : `שעה ${current.time}. `) : "";
+    const prompt = isEn
+        ? `${timePrefix}${current.title}. Press 6 for next, 4 for previous, 8 for details, Star for menu.`
+        : `${timePrefix}${current.title}. לחץ 6 למבזק הבא, 4 לקודם, 8 לפרטים, כוכבית לתפריט.`;
 
     await gatherPlayOrSay(
         r,
@@ -63,7 +74,7 @@ router.all("/read", async (req, res) => {
         `${CONFIG.BASE_URL}/news/action`,
         1,
         10,
-        { voice: user.settings?.hebrew_voice }
+        { voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice }
     );
 
     r.redirect(`${CONFIG.BASE_URL}/twiml`);
@@ -78,7 +89,10 @@ router.all("/action", async (req, res) => {
     const session = getNewsSession(req.body.CallSid);
     const caller = req.body.From;
     const user = await getUser(caller);
+    const isEn = user.settings?.language !== "he";
     const key = req.body.Digits;
+
+    console.log(`[News] 🔘 [Call: ${req.body.CallSid}] News action key: "${key}" (Index: ${session.index})`);
 
     if (key === "*") {
         r.redirect(`${CONFIG.BASE_URL}/twiml`);
@@ -99,8 +113,13 @@ router.all("/action", async (req, res) => {
 
     if (key === "8") {
         const current = session.items[session.index];
-        const detailText = `מאת ${current.creator}. ${current.details}`;
-        await playInterruptible(r, detailText, `${CONFIG.BASE_URL}/news/read`, { voice: user.settings?.hebrew_voice });
+        const detailText = isEn
+            ? `Reported by ${current.creator}. ${current.details}`
+            : `מאת ${current.creator}. ${current.details}`;
+        console.log(`[News] 📖 [Call: ${req.body.CallSid}] Reading full news snippet for "${current.title}"`);
+        await playInterruptible(r, detailText, `${CONFIG.BASE_URL}/news/read`, {
+            voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice
+        });
         r.redirect(`${CONFIG.BASE_URL}/news/read`);
         return res.type("text/xml").send(r.toString());
     }

@@ -29,14 +29,17 @@ export async function generateTTS(text, options = {}) {
         const outputPath = path.resolve(CONFIG.DOWNLOAD_DIR, filename);
 
         const isHeb = isHebrewText(cleanText);
-        const voice = options.voice || (isHeb ? VOICES.HEBREW.Hila : VOICES.ENGLISH.Christopher);
+        const voice = options.voice || (isHeb ? (options.hebrew_voice || VOICES.HEBREW.Hila) : (options.english_voice || VOICES.ENGLISH.Christopher));
         const rate = options.rate || "+0%";
+
+        console.log(`[TTS] 🎙️ Generating speech (${voice}, speed: ${rate}): "${cleanText.slice(0, 60)}..."`);
 
         const args = ["--text", cleanText, "--voice", voice, "--rate", rate, "--write-media", outputPath];
         const child = spawn("edge-tts", args);
 
         child.on("close", (code) => {
             if (code === 0 && fs.existsSync(outputPath)) {
+                console.log(`[TTS] ✅ Speech ready: ${filename}`);
                 // Auto-cleanup after 6 minutes
                 setTimeout(() => {
                     try {
@@ -45,7 +48,7 @@ export async function generateTTS(text, options = {}) {
                 }, 360000);
                 resolve(filename);
             } else {
-                console.warn(`edge-tts exited with code ${code} for voice ${voice}`);
+                console.warn(`[TTS] ⚠️ edge-tts exited with code ${code} for voice ${voice}`);
                 resolve(null);
             }
         });

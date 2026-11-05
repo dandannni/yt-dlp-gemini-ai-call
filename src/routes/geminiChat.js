@@ -5,8 +5,7 @@ import { gatherPlayOrSay, playInterruptible, generateTTS, VOICES } from "../serv
 import {
     analyzeAudioIntent,
     chatWithGemini,
-    summarizeChatSoFar,
-    SYSTEM_PRESETS
+    summarizeChatSoFar
 } from "../services/gemini.js";
 import {
     getUser,
@@ -42,8 +41,13 @@ router.all("/menu", async (req, res) => {
     const r = new VoiceResponse();
     const caller = req.body.From;
     const user = await getUser(caller);
+    const isEn = user.settings?.language !== "he";
 
-    const prompt = "שיחה עם בינה מלאכותית: 1 לשיחה חדשה, 2 להמשך שיחה מהיסטוריה, 3 לשיחות שמורות, 4 להגדרות, כוכבית לתפריט הראשי.";
+    console.log(`[Chat] 🤖 [Call: ${req.body.CallSid}] Opening Chat Menu (Lang: ${isEn ? "English" : "Hebrew"})`);
+
+    const prompt = isEn
+        ? "AI Assistant. Press 1 for a new chat, 2 to continue recent chat, 3 for saved chats, 4 for settings, Star for main menu."
+        : "שיחה עם בינה מלאכותית: 1 לשיחה חדשה, 2 להמשך שיחה מהיסטוריה, 3 לשיחות שמורות, 4 להגדרות, כוכבית לתפריט הראשי.";
 
     await gatherPlayOrSay(
         r,
@@ -51,7 +55,7 @@ router.all("/menu", async (req, res) => {
         `${CONFIG.BASE_URL}/chat/menu-action`,
         1,
         8,
-        { voice: user.settings?.hebrew_voice }
+        { voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice }
     );
 
     r.redirect(`${CONFIG.BASE_URL}/twiml`);
@@ -65,16 +69,23 @@ router.all("/menu-action", async (req, res) => {
     const r = new VoiceResponse();
     const caller = req.body.From;
     const user = await getUser(caller);
+    const isEn = user.settings?.language !== "he";
     const session = getChatSession(req.body.CallSid);
     const key = req.body.Digits;
 
+    console.log(`[Chat] 🔘 [Call: ${req.body.CallSid}] Chat menu key: "${key}"`);
+
     if (key === "1") {
         // Start brand new chat
+        console.log(`[Chat] 🆕 [Call: ${req.body.CallSid}] Starting brand new chat session`);
         await clearChatHistory(caller);
         session.activeTurns = [];
         session.currentTurnIndex = 0;
 
-        await playInterruptible(r, "דבר לאחר הצפצוף.", `${CONFIG.BASE_URL}/chat/record-prompt`, { voice: user.settings?.hebrew_voice });
+        const speakPrompt = isEn ? "Speak after the tone." : "דבר לאחר הצפצוף.";
+        await playInterruptible(r, speakPrompt, `${CONFIG.BASE_URL}/chat/record-prompt`, {
+            voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice
+        });
         r.record({
             action: `${CONFIG.BASE_URL}/chat/process-speech`,
             method: "POST",
@@ -89,14 +100,23 @@ router.all("/menu-action", async (req, res) => {
         // Continue chat from history
         const history = user.chat_history || [];
         if (history.length === 0) {
-            await playInterruptible(r, "אין שיחות קודמות בהיסטוריה.", `${CONFIG.BASE_URL}/chat/menu`, { voice: user.settings?.hebrew_voice });
+            console.log(`[Chat] ℹ️ [Call: ${req.body.CallSid}] No previous history found`);
+            const noHistMsg = isEn ? "No previous chats found in history." : "אין שיחות קודמות בהיסטוריה.";
+            await playInterruptible(r, noHistMsg, `${CONFIG.BASE_URL}/chat/menu`, {
+                voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice
+            });
             r.redirect(`${CONFIG.BASE_URL}/chat/menu`);
             return res.type("text/xml").send(r.toString());
         }
 
+        console.log(`[Chat] 📜 [Call: ${req.body.CallSid}] Resuming chat with ${history.length} previous turns`);
         session.activeTurns = [...history];
         session.currentTurnIndex = Math.max(0, history.length - 1);
-        await playInterruptible(r, "ממשיך שיחה קודמת. דבר לאחר הצפצוף.", `${CONFIG.BASE_URL}/chat/record-prompt`, { voice: user.settings?.hebrew_voice });
+
+        const resumePrompt = isEn ? "Resuming previous chat. Speak after the tone." : "ממשיך שיחה קודמת. דבר לאחר הצפצוף.";
+        await playInterruptible(r, resumePrompt, `${CONFIG.BASE_URL}/chat/record-prompt`, {
+            voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice
+        });
         r.record({
             action: `${CONFIG.BASE_URL}/chat/process-speech`,
             method: "POST",
@@ -111,7 +131,11 @@ router.all("/menu-action", async (req, res) => {
         // Saved chats
         const saved = user.saved_chats || [];
         if (saved.length === 0) {
-            await playInterruptible(r, "אין שיחות שמורות.", `${CONFIG.BASE_URL}/chat/menu`, { voice: user.settings?.hebrew_voice });
+            console.log(`[Chat] ℹ️ [Call: ${req.body.CallSid}] No saved chats found`);
+            const noSavedMsg = isEn ? "No saved chats found." : "אין שיחות שמורות.";
+            await playInterruptible(r, noSavedMsg, `${CONFIG.BASE_URL}/chat/menu`, {
+                voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice
+            });
             r.redirect(`${CONFIG.BASE_URL}/chat/menu`);
             return res.type("text/xml").send(r.toString());
         }
@@ -137,13 +161,17 @@ router.all("/process-speech", async (req, res) => {
     const r = new VoiceResponse();
     const caller = req.body.From;
     const user = await getUser(caller);
+    const isEn = user.settings?.language !== "he";
     const session = getChatSession(req.body.CallSid);
     const recordingUrl = req.body.RecordingUrl;
 
     if (!recordingUrl) {
+        console.warn(`[Chat] ⚠️ [Call: ${req.body.CallSid}] Empty RecordingUrl received`);
         r.redirect(`${CONFIG.BASE_URL}/chat/menu`);
         return res.type("text/xml").send(r.toString());
     }
+
+    console.log(`[Chat] 🎙️ [Call: ${req.body.CallSid}] Speech recording received: ${recordingUrl}`);
 
     let base64Audio = null;
     try {
@@ -152,14 +180,20 @@ router.all("/process-speech", async (req, res) => {
         if (fetchRes.ok) {
             base64Audio = Buffer.from(await fetchRes.arrayBuffer()).toString("base64");
         }
-    } catch (e) {}
+    } catch (e) {
+        console.error(`[Chat] ❌ Fetch recording error:`, e.message);
+    }
 
     const intentData = base64Audio ? await analyzeAudioIntent(base64Audio) : null;
-    const queryText = intentData?.query || "שלום";
+    const queryText = intentData?.query || (isEn ? "Hello" : "שלום");
+
+    console.log(`[Chat] 🧠 [Call: ${req.body.CallSid}] Query recognized: "${queryText}" (Intent: ${intentData?.intent || "chat"})`);
 
     const replyText = await chatWithGemini(caller, queryText);
+    console.log(`[Chat] 💬 [Call: ${req.body.CallSid}] Gemini replied: "${replyText.slice(0, 100)}..."`);
+
     const ttsFile = await generateTTS(replyText, {
-        voice: user.settings?.hebrew_voice,
+        voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice,
         rate: user.settings?.tts_speed || "+0%"
     });
 
@@ -179,6 +213,8 @@ router.all("/process-speech", async (req, res) => {
  */
 router.all("/play-reply", async (req, res) => {
     const r = new VoiceResponse();
+    const user = await getUser(req.body.From);
+    const isEn = user.settings?.language !== "he";
     const session = getChatSession(req.body.CallSid);
 
     const g = r.gather({
@@ -196,12 +232,17 @@ router.all("/play-reply", async (req, res) => {
     }
 
     // Controls prompt
+    const ctrlPrompt = isEn
+        ? "1 to continue, 3 to save, 4 for previous turn, 6 for next turn, 7 for summary, Star for menu."
+        : "1 להמשך, 3 לשמירה, 4 לקודם, 6 להבא, 7 לסיכום, כוכבית לתפריט.";
+
     await gatherPlayOrSay(
         r,
-        "1 להמשך, 3 לשמירה, 4 לקודם, 6 להבא, 7 לסיכום, כוכבית לתפריט.",
+        ctrlPrompt,
         `${CONFIG.BASE_URL}/chat/post-reply-action`,
         1,
-        8
+        8,
+        { voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice }
     );
 
     r.redirect(`${CONFIG.BASE_URL}/chat/menu`);
@@ -215,8 +256,11 @@ router.all("/post-reply-action", async (req, res) => {
     const r = new VoiceResponse();
     const caller = req.body.From;
     const user = await getUser(caller);
+    const isEn = user.settings?.language !== "he";
     const session = getChatSession(req.body.CallSid);
     const key = req.body.Digits;
+
+    console.log(`[Chat] 🔘 [Call: ${req.body.CallSid}] Post-reply action key: "${key}"`);
 
     if (key === "*") {
         r.redirect(`${CONFIG.BASE_URL}/chat/menu`);
@@ -225,7 +269,10 @@ router.all("/post-reply-action", async (req, res) => {
 
     if (key === "1") {
         // Continue chat
-        await playInterruptible(r, "דבר לאחר הצפצוף.", `${CONFIG.BASE_URL}/chat/record-prompt`, { voice: user.settings?.hebrew_voice });
+        const speakPrompt = isEn ? "Speak after the tone." : "דבר לאחר הצפצוף.";
+        await playInterruptible(r, speakPrompt, `${CONFIG.BASE_URL}/chat/record-prompt`, {
+            voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice
+        });
         r.record({
             action: `${CONFIG.BASE_URL}/chat/process-speech`,
             method: "POST",
@@ -238,8 +285,13 @@ router.all("/post-reply-action", async (req, res) => {
 
     if (key === "3") {
         // Save current chat session
-        await saveCurrentChatAsBookmark(caller, "שיחה שמורה");
-        await playInterruptible(r, "השיחה נשמרה בהצלחה.", `${CONFIG.BASE_URL}/chat/play-reply`, { voice: user.settings?.hebrew_voice });
+        const title = session.activeTurns[0]?.parts[0]?.text?.slice(0, 30) || (isEn ? "Saved Chat" : "שיחה שמורה");
+        await saveCurrentChatAsBookmark(caller, title);
+        console.log(`[Chat] 💾 [Call: ${req.body.CallSid}] Chat bookmarked: "${title}"`);
+        const savedMsg = isEn ? "Chat saved successfully." : "השיחה נשמרה בהצלחה.";
+        await playInterruptible(r, savedMsg, `${CONFIG.BASE_URL}/chat/play-reply`, {
+            voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice
+        });
         r.redirect(`${CONFIG.BASE_URL}/chat/play-reply`);
         return res.type("text/xml").send(r.toString());
     }
@@ -251,7 +303,9 @@ router.all("/post-reply-action", async (req, res) => {
         const turn = modelTurns[session.currentTurnIndex] || modelTurns[modelTurns.length - 1];
         if (turn) {
             session.pendingReplyText = turn.parts[0]?.text || "";
-            session.pendingTtsFile = await generateTTS(session.pendingReplyText, { voice: user.settings?.hebrew_voice });
+            session.pendingTtsFile = await generateTTS(session.pendingReplyText, {
+                voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice
+            });
         }
         r.redirect(`${CONFIG.BASE_URL}/chat/play-reply`);
         return res.type("text/xml").send(r.toString());
@@ -264,7 +318,9 @@ router.all("/post-reply-action", async (req, res) => {
         const turn = modelTurns[session.currentTurnIndex];
         if (turn) {
             session.pendingReplyText = turn.parts[0]?.text || "";
-            session.pendingTtsFile = await generateTTS(session.pendingReplyText, { voice: user.settings?.hebrew_voice });
+            session.pendingTtsFile = await generateTTS(session.pendingReplyText, {
+                voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice
+            });
         }
         r.redirect(`${CONFIG.BASE_URL}/chat/play-reply`);
         return res.type("text/xml").send(r.toString());
@@ -272,9 +328,12 @@ router.all("/post-reply-action", async (req, res) => {
 
     if (key === "7") {
         // Quick 15-second summary
+        console.log(`[Chat] 📝 [Call: ${req.body.CallSid}] Generating quick chat summary`);
         const summary = await summarizeChatSoFar(caller);
         session.pendingReplyText = summary;
-        session.pendingTtsFile = await generateTTS(summary, { voice: user.settings?.hebrew_voice });
+        session.pendingTtsFile = await generateTTS(summary, {
+            voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice
+        });
         r.redirect(`${CONFIG.BASE_URL}/chat/play-reply`);
         return res.type("text/xml").send(r.toString());
     }
@@ -290,17 +349,23 @@ router.all("/browse-saved", async (req, res) => {
     const r = new VoiceResponse();
     const caller = req.body.From;
     const user = await getUser(caller);
+    const isEn = user.settings?.language !== "he";
     const session = getChatSession(req.body.CallSid);
 
     const saved = user.saved_chats || [];
     if (saved.length === 0) {
-        await playInterruptible(r, "אין שיחות שמורות.", `${CONFIG.BASE_URL}/chat/menu`, { voice: user.settings?.hebrew_voice });
+        const noSavedMsg = isEn ? "No saved chats." : "אין שיחות שמורות.";
+        await playInterruptible(r, noSavedMsg, `${CONFIG.BASE_URL}/chat/menu`, {
+            voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice
+        });
         r.redirect(`${CONFIG.BASE_URL}/chat/menu`);
         return res.type("text/xml").send(r.toString());
     }
 
     const current = saved[session.browseIndex];
-    const prompt = `שיחה שמורה: ${current.title}. לחץ 5 להמשך שיחה זו, 6 להבאה, 4 לקודמת, 9 למחיקה, כוכבית לחזרה.`;
+    const prompt = isEn
+        ? `Saved chat: ${current.title}. Press 5 to continue this chat, 6 for next, 4 for previous, 9 to delete, Star to return.`
+        : `שיחה שמורה: ${current.title}. לחץ 5 להמשך שיחה זו, 6 להבאה, 4 לקודמת, 9 למחיקה, כוכבית לחזרה.`;
 
     await gatherPlayOrSay(
         r,
@@ -308,7 +373,7 @@ router.all("/browse-saved", async (req, res) => {
         `${CONFIG.BASE_URL}/chat/saved-action`,
         1,
         10,
-        { voice: user.settings?.hebrew_voice }
+        { voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice }
     );
 
     r.redirect(`${CONFIG.BASE_URL}/chat/menu`);
@@ -322,6 +387,7 @@ router.all("/saved-action", async (req, res) => {
     const r = new VoiceResponse();
     const caller = req.body.From;
     const user = await getUser(caller);
+    const isEn = user.settings?.language !== "he";
     const session = getChatSession(req.body.CallSid);
     const key = req.body.Digits;
 
@@ -336,12 +402,16 @@ router.all("/saved-action", async (req, res) => {
         // Resume saved chat
         const target = saved[session.browseIndex];
         if (target && target.turns) {
+            console.log(`[Chat] 📂 [Call: ${req.body.CallSid}] Resuming saved chat: "${target.title}"`);
             await clearChatHistory(caller);
             for (const t of target.turns) {
                 await saveChatHistory(caller, t.role, t.parts[0]?.text);
             }
             session.activeTurns = [...target.turns];
-            await playInterruptible(r, "ממשיך שיחה זו. דבר לאחר הצפצוף.", `${CONFIG.BASE_URL}/chat/record-prompt`, { voice: user.settings?.hebrew_voice });
+            const speakPrompt = isEn ? "Resuming saved conversation. Speak after the tone." : "ממשיך שיחה זו. דבר לאחר הצפצוף.";
+            await playInterruptible(r, speakPrompt, `${CONFIG.BASE_URL}/chat/record-prompt`, {
+                voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice
+            });
             r.record({
                 action: `${CONFIG.BASE_URL}/chat/process-speech`,
                 method: "POST",
@@ -369,7 +439,11 @@ router.all("/saved-action", async (req, res) => {
         // Delete saved chat
         await deleteSavedChat(caller, session.browseIndex);
         session.browseIndex = 0;
-        await playInterruptible(r, "השיחה נמחקה.", `${CONFIG.BASE_URL}/chat/browse-saved`, { voice: user.settings?.hebrew_voice });
+        console.log(`[Chat] 🗑️ [Call: ${req.body.CallSid}] Deleted saved chat at index ${session.browseIndex}`);
+        const delMsg = isEn ? "Chat deleted." : "השיחה נמחקה.";
+        await playInterruptible(r, delMsg, `${CONFIG.BASE_URL}/chat/browse-saved`, {
+            voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice
+        });
         r.redirect(`${CONFIG.BASE_URL}/chat/browse-saved`);
         return res.type("text/xml").send(r.toString());
     }
@@ -385,8 +459,13 @@ router.all("/settings", async (req, res) => {
     const r = new VoiceResponse();
     const caller = req.body.From;
     const user = await getUser(caller);
+    const isEn = user.settings?.language !== "he";
 
-    const prompt = "הגדרות: 1 לבחירת קול, 2 לבחירת מודל בינה מלאכותית, 3 להוראות מערכת, 4 לקצב דיבור, כוכבית לחזרה.";
+    console.log(`[Settings] ⚙️ [Call: ${req.body.CallSid}] Opening Settings Menu`);
+
+    const prompt = isEn
+        ? "Settings: Press 1 for voice, 2 for AI model, 3 for persona style, 4 for speech speed, 5 to change language, Star to return."
+        : "הגדרות: 1 לבחירת קול, 2 לבחירת מודל בינה מלאכותית, 3 לסגנון שיחה, 4 לקצב דיבור, 5 להחלפת שפה, כוכבית לחזרה.";
 
     await gatherPlayOrSay(
         r,
@@ -394,7 +473,7 @@ router.all("/settings", async (req, res) => {
         `${CONFIG.BASE_URL}/chat/settings-action`,
         1,
         8,
-        { voice: user.settings?.hebrew_voice }
+        { voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice }
     );
 
     r.redirect(`${CONFIG.BASE_URL}/twiml`);
@@ -408,15 +487,28 @@ router.all("/settings-action", async (req, res) => {
     const r = new VoiceResponse();
     const caller = req.body.From;
     const user = await getUser(caller);
+    const isEn = user.settings?.language !== "he";
     const key = req.body.Digits;
 
+    console.log(`[Settings] 🔘 [Call: ${req.body.CallSid}] Settings key: "${key}"`);
+
     if (key === "1") {
-        // Voice toggle (Hila vs Avri)
-        const currentVoice = user.settings?.hebrew_voice || VOICES.HEBREW.Hila;
-        const newVoice = currentVoice === VOICES.HEBREW.Hila ? VOICES.HEBREW.Avri : VOICES.HEBREW.Hila;
-        await updateUserSettings(caller, { hebrew_voice: newVoice });
-        const name = newVoice === VOICES.HEBREW.Hila ? "הילה" : "אברי";
-        await playInterruptible(r, `הקול הוגדר לקול של ${name}.`, `${CONFIG.BASE_URL}/chat/settings`, { voice: newVoice });
+        // Voice toggle
+        if (isEn) {
+            const currentVoice = user.settings?.english_voice || VOICES.ENGLISH.Christopher;
+            const newVoice = currentVoice === VOICES.ENGLISH.Christopher ? VOICES.ENGLISH.Jenny : VOICES.ENGLISH.Christopher;
+            await updateUserSettings(caller, { english_voice: newVoice });
+            const name = newVoice === VOICES.ENGLISH.Christopher ? "Christopher" : "Jenny";
+            console.log(`[Settings] Voice changed to ${name}`);
+            await playInterruptible(r, `Voice set to ${name}.`, `${CONFIG.BASE_URL}/chat/settings`, { voice: newVoice });
+        } else {
+            const currentVoice = user.settings?.hebrew_voice || VOICES.HEBREW.Hila;
+            const newVoice = currentVoice === VOICES.HEBREW.Hila ? VOICES.HEBREW.Avri : VOICES.HEBREW.Hila;
+            await updateUserSettings(caller, { hebrew_voice: newVoice });
+            const name = newVoice === VOICES.HEBREW.Hila ? "הילה" : "אברי";
+            console.log(`[Settings] Voice changed to ${name}`);
+            await playInterruptible(r, `הקול הוגדר לקול של ${name}.`, `${CONFIG.BASE_URL}/chat/settings`, { voice: newVoice });
+        }
         r.redirect(`${CONFIG.BASE_URL}/chat/settings`);
         return res.type("text/xml").send(r.toString());
     }
@@ -426,7 +518,11 @@ router.all("/settings-action", async (req, res) => {
         const currentModel = user.settings?.model || "gemini-2.5-flash";
         const newModel = currentModel === "gemini-2.5-flash" ? "gemini-2.5-pro" : "gemini-2.5-flash";
         await updateUserSettings(caller, { model: newModel });
-        await playInterruptible(r, `המודל הוגדר ל-${newModel}.`, `${CONFIG.BASE_URL}/chat/settings`, { voice: user.settings?.hebrew_voice });
+        console.log(`[Settings] AI Model changed to ${newModel}`);
+        const msg = isEn ? `Model set to ${newModel}.` : `המודל הוגדר ל-${newModel}.`;
+        await playInterruptible(r, msg, `${CONFIG.BASE_URL}/chat/settings`, {
+            voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice
+        });
         r.redirect(`${CONFIG.BASE_URL}/chat/settings`);
         return res.type("text/xml").send(r.toString());
     }
@@ -436,8 +532,11 @@ router.all("/settings-action", async (req, res) => {
         const currentPreset = user.settings?.system_prompt_preset || "default";
         const nextPreset = currentPreset === "default" ? "tutor" : (currentPreset === "tutor" ? "brief" : "default");
         await updateUserSettings(caller, { system_prompt_preset: nextPreset });
-        const names = { default: "עוזר חכם כללי", tutor: "מורה ומסביר מושגים", brief: "תמציתי וממוקד" };
-        await playInterruptible(r, `הוגדר סגנון ${names[nextPreset]}.`, `${CONFIG.BASE_URL}/chat/settings`, { voice: user.settings?.hebrew_voice });
+        console.log(`[Settings] Persona preset changed to ${nextPreset}`);
+        const msg = isEn ? `Persona style set to ${nextPreset}.` : `סגנון השיחה הוגדר ל-${nextPreset}.`;
+        await playInterruptible(r, msg, `${CONFIG.BASE_URL}/chat/settings`, {
+            voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice
+        });
         r.redirect(`${CONFIG.BASE_URL}/chat/settings`);
         return res.type("text/xml").send(r.toString());
     }
@@ -447,7 +546,30 @@ router.all("/settings-action", async (req, res) => {
         const currentSpeed = user.settings?.tts_speed || "+0%";
         const nextSpeed = currentSpeed === "+0%" ? "+20%" : (currentSpeed === "+20%" ? "+35%" : "+0%");
         await updateUserSettings(caller, { tts_speed: nextSpeed });
-        await playInterruptible(r, `קצב הדיבור הוגדר ל-${nextSpeed}.`, `${CONFIG.BASE_URL}/chat/settings`, { voice: user.settings?.hebrew_voice, rate: nextSpeed });
+        console.log(`[Settings] Speech rate changed to ${nextSpeed}`);
+        const msg = isEn ? `Speech speed set to ${nextSpeed}.` : `קצב הדיבור הוגדר ל-${nextSpeed}.`;
+        await playInterruptible(r, msg, `${CONFIG.BASE_URL}/chat/settings`, {
+            voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice,
+            rate: nextSpeed
+        });
+        r.redirect(`${CONFIG.BASE_URL}/chat/settings`);
+        return res.type("text/xml").send(r.toString());
+    }
+
+    if (key === "5") {
+        // Language Toggle (English <-> Hebrew)
+        const newLang = isEn ? "he" : "en";
+        await updateUserSettings(caller, { language: newLang });
+        console.log(`[Settings] 🌐 System language toggled to: ${newLang === "en" ? "English" : "Hebrew"}`);
+        if (newLang === "en") {
+            await playInterruptible(r, "Language set to English.", `${CONFIG.BASE_URL}/chat/settings`, {
+                voice: VOICES.ENGLISH.Christopher
+            });
+        } else {
+            await playInterruptible(r, "השפה הוגדרה בהצלחה לעברית.", `${CONFIG.BASE_URL}/chat/settings`, {
+                voice: VOICES.HEBREW.Hila
+            });
+        }
         r.redirect(`${CONFIG.BASE_URL}/chat/settings`);
         return res.type("text/xml").send(r.toString());
     }

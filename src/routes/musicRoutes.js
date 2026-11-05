@@ -33,8 +33,13 @@ router.all("/menu", async (req, res) => {
     const r = new VoiceResponse();
     const caller = req.body.From;
     const user = await getUser(caller);
+    const isEn = user.settings?.language !== "he";
 
-    const prompt = "מוזיקה: 1 לחיפוש שיר, 2 להיסטוריה, 3 לשירים שמורים, 4 לפלייליסטים, 5 להגדרות, כוכבית לתפריט הראשי.";
+    console.log(`[Music] 🎵 [Call: ${req.body.CallSid}] Opening Music Menu (Lang: ${isEn ? "English" : "Hebrew"})`);
+
+    const prompt = isEn
+        ? "Music Menu. Press 1 to search for a song, 2 for history, 3 for saved songs, 4 for playlists, 5 for search settings, Star for main menu."
+        : "מוזיקה: 1 לחיפוש שיר, 2 להיסטוריה, 3 לשירים שמורים, 4 לפלייליסטים, 5 להגדרות, כוכבית לתפריט הראשי.";
 
     await gatherPlayOrSay(
         r,
@@ -42,7 +47,7 @@ router.all("/menu", async (req, res) => {
         `${CONFIG.BASE_URL}/music/menu-action`,
         1,
         8,
-        { voice: user.settings?.hebrew_voice }
+        { voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice }
     );
 
     r.redirect(`${CONFIG.BASE_URL}/twiml`);
@@ -56,12 +61,18 @@ router.all("/menu-action", async (req, res) => {
     const r = new VoiceResponse();
     const caller = req.body.From;
     const user = await getUser(caller);
+    const isEn = user.settings?.language !== "he";
     const browse = getBrowseSession(req.body.CallSid);
     const key = req.body.Digits;
 
+    console.log(`[Music] 🔘 [Call: ${req.body.CallSid}] Music menu key: "${key}"`);
+
     if (key === "1") {
         // Search song via voice recording
-        await playInterruptible(r, "אמור את שם השיר או האמן לאחר הצפצוף.", `${CONFIG.BASE_URL}/music/record-search`, { voice: user.settings?.hebrew_voice });
+        const speakPrompt = isEn ? "Say the song name or artist after the beep." : "אמור את שם השיר או האמן לאחר הצפצוף.";
+        await playInterruptible(r, speakPrompt, `${CONFIG.BASE_URL}/music/record-search`, {
+            voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice
+        });
         r.record({
             action: `${CONFIG.BASE_URL}/music/process-search`,
             method: "POST",
@@ -77,6 +88,7 @@ router.all("/menu-action", async (req, res) => {
         browse.type = "history";
         browse.list = user.music_history || [];
         browse.index = 0;
+        console.log(`[Music] 📜 [Call: ${req.body.CallSid}] Browsing music history (${browse.list.length} tracks)`);
         r.redirect(`${CONFIG.BASE_URL}/music/browse`);
         return res.type("text/xml").send(r.toString());
     }
@@ -86,6 +98,7 @@ router.all("/menu-action", async (req, res) => {
         browse.type = "likes";
         browse.list = await getLikedSongs(caller);
         browse.index = 0;
+        console.log(`[Music] ❤️ [Call: ${req.body.CallSid}] Browsing saved songs (${browse.list.length} tracks)`);
         r.redirect(`${CONFIG.BASE_URL}/music/browse`);
         return res.type("text/xml").send(r.toString());
     }
@@ -97,6 +110,7 @@ router.all("/menu-action", async (req, res) => {
         const allSongs = Object.values(playlists).flat();
         browse.list = allSongs.sort(() => Math.random() - 0.5); // Shuffle
         browse.index = 0;
+        console.log(`[Music] 🔀 [Call: ${req.body.CallSid}] Browsing shuffled playlist (${browse.list.length} tracks)`);
         r.redirect(`${CONFIG.BASE_URL}/music/browse`);
         return res.type("text/xml").send(r.toString());
     }
@@ -106,8 +120,12 @@ router.all("/menu-action", async (req, res) => {
         const current = user.settings?.search_engine || "scsearch1:";
         const newEngine = current.startsWith("scsearch") ? "ytsearch1:" : "scsearch1:";
         await updateUserSettings(caller, { search_engine: newEngine });
-        const name = newEngine.startsWith("scsearch") ? "סאונדקלאוד" : "יוטיוב";
-        await playInterruptible(r, `מנוע החיפוש הוגדר ל${name}.`, `${CONFIG.BASE_URL}/music/menu`, { voice: user.settings?.hebrew_voice });
+        const name = newEngine.startsWith("scsearch") ? "SoundCloud" : "YouTube";
+        console.log(`[Music] 🔍 [Call: ${req.body.CallSid}] Search engine toggled to: ${name}`);
+        const msg = isEn ? `Search engine set to ${name}.` : `מנוע החיפוש הוגדר ל-${newEngine.startsWith("scsearch") ? "סאונדקלאוד" : "יוטיוב"}.`;
+        await playInterruptible(r, msg, `${CONFIG.BASE_URL}/music/menu`, {
+            voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice
+        });
         r.redirect(`${CONFIG.BASE_URL}/music/menu`);
         return res.type("text/xml").send(r.toString());
     }
@@ -123,6 +141,7 @@ router.all("/process-search", async (req, res) => {
     const r = new VoiceResponse();
     const caller = req.body.From;
     const user = await getUser(caller);
+    const isEn = user.settings?.language !== "he";
     const recordingUrl = req.body.RecordingUrl;
 
     if (!recordingUrl) {
@@ -137,11 +156,15 @@ router.all("/process-search", async (req, res) => {
         if (fetchRes.ok) {
             base64Audio = Buffer.from(await fetchRes.arrayBuffer()).toString("base64");
         }
-    } catch (e) {}
+    } catch (e) {
+        console.error(`[Music] ❌ Recording download error:`, e.message);
+    }
 
     const intentData = base64Audio ? await analyzeAudioIntent(base64Audio) : null;
-    const query = intentData?.query || "Israel popular songs";
+    const query = intentData?.query || "popular music";
     const isLong = intentData?.intent === "music_long";
+
+    console.log(`[Music] 🔍 [Call: ${req.body.CallSid}] Song search query recognized: "${query}" (Long: ${isLong})`);
 
     await saveMusicHistory(caller, query);
     searchAndDownloadMusic(req.body.CallSid, query, {
@@ -149,7 +172,10 @@ router.all("/process-search", async (req, res) => {
         engine: user.settings?.search_engine || "scsearch1:"
     });
 
-    await playInterruptible(r, `מחפש את ${query}`, `${CONFIG.BASE_URL}/music/wait-loop`, { voice: user.settings?.hebrew_voice });
+    const searchPrompt = isEn ? `Finding ${query}...` : `מחפש את ${query}...`;
+    await playInterruptible(r, searchPrompt, `${CONFIG.BASE_URL}/music/wait-loop`, {
+        voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice
+    });
     r.redirect(`${CONFIG.BASE_URL}/music/wait-loop`);
     res.type("text/xml").send(r.toString());
 });
@@ -159,6 +185,9 @@ router.all("/process-search", async (req, res) => {
  */
 router.all("/wait-loop", async (req, res) => {
     const r = new VoiceResponse();
+    const caller = req.body.From;
+    const user = await getUser(caller);
+    const isEn = user.settings?.language !== "he";
     const task = musicQueue.get(req.body.CallSid);
 
     if (!task) {
@@ -167,6 +196,7 @@ router.all("/wait-loop", async (req, res) => {
     }
 
     if (task.status === "done") {
+        console.log(`[Music] 🚀 [Call: ${req.body.CallSid}] Track ready. Handing off to Player Engine: ${task.url}`);
         const playerState = getPlayerSession(req.body.CallSid);
         playerState.type = "music";
         playerState.title = task.query;
@@ -180,8 +210,12 @@ router.all("/wait-loop", async (req, res) => {
         return res.type("text/xml").send(r.toString());
     }
 
-    if (task.status === "error" || (Date.now() - task.startTime > 45000)) {
-        await playInterruptible(r, "שגיאה במציאת השיר. אנא נסה שוב.", `${CONFIG.BASE_URL}/music/menu`);
+    if (task.status === "error" || (Date.now() - task.startTime > 50000)) {
+        console.warn(`[Music] ❌ [Call: ${req.body.CallSid}] Track download error or timeout for query: "${task.query}"`);
+        const errPrompt = isEn ? "Could not find the song. Please try another search." : "שגיאה במציאת השיר. אנא נסה שוב.";
+        await playInterruptible(r, errPrompt, `${CONFIG.BASE_URL}/music/menu`, {
+            voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice
+        });
         r.redirect(`${CONFIG.BASE_URL}/music/menu`);
         return res.type("text/xml").send(r.toString());
     }
@@ -198,18 +232,27 @@ router.all("/browse", async (req, res) => {
     const r = new VoiceResponse();
     const caller = req.body.From;
     const user = await getUser(caller);
+    const isEn = user.settings?.language !== "he";
     const browse = getBrowseSession(req.body.CallSid);
 
     if (!browse.list || browse.list.length === 0) {
-        await playInterruptible(r, "הרשימה ריקה.", `${CONFIG.BASE_URL}/music/menu`, { voice: user.settings?.hebrew_voice });
+        const emptyMsg = isEn ? "The list is empty." : "הרשימה ריקה.";
+        await playInterruptible(r, emptyMsg, `${CONFIG.BASE_URL}/music/menu`, {
+            voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice
+        });
         r.redirect(`${CONFIG.BASE_URL}/music/menu`);
         return res.type("text/xml").send(r.toString());
     }
 
     const currentItem = browse.list[browse.index];
-    let prompt = `${currentItem}. לחץ 5 להשמעה, 6 להבא, 4 לקודם.`;
-    if (browse.type === "likes") prompt += " 9 למחיקה.";
-    prompt += " כוכבית לחזרה.";
+    let prompt = isEn
+        ? `${currentItem}. Press 5 to play, 6 for next, 4 for previous.`
+        : `${currentItem}. לחץ 5 להשמעה, 6 להבא, 4 לקודם.`;
+
+    if (browse.type === "likes") {
+        prompt += isEn ? " 9 to remove." : " 9 למחיקה.";
+    }
+    prompt += isEn ? " Star to return." : " כוכבית לחזרה.";
 
     await gatherPlayOrSay(
         r,
@@ -217,7 +260,7 @@ router.all("/browse", async (req, res) => {
         `${CONFIG.BASE_URL}/music/browse-action`,
         1,
         10,
-        { voice: user.settings?.hebrew_voice }
+        { voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice }
     );
 
     r.redirect(`${CONFIG.BASE_URL}/music/menu`);
@@ -231,8 +274,11 @@ router.all("/browse-action", async (req, res) => {
     const r = new VoiceResponse();
     const caller = req.body.From;
     const user = await getUser(caller);
+    const isEn = user.settings?.language !== "he";
     const browse = getBrowseSession(req.body.CallSid);
     const key = req.body.Digits;
+
+    console.log(`[Music] 🔘 [Call: ${req.body.CallSid}] Browse action key: "${key}"`);
 
     if (key === "*") {
         r.redirect(`${CONFIG.BASE_URL}/music/menu`);
@@ -242,8 +288,12 @@ router.all("/browse-action", async (req, res) => {
     if (key === "5") {
         // Play selected item
         const selected = browse.list[browse.index];
+        console.log(`[Music] ▶️ [Call: ${req.body.CallSid}] Selected item to play: "${selected}"`);
         searchAndDownloadMusic(req.body.CallSid, selected, { engine: user.settings?.search_engine || "scsearch1:" });
-        await playInterruptible(r, `מנגן את ${selected}`, `${CONFIG.BASE_URL}/music/wait-loop`, { voice: user.settings?.hebrew_voice });
+        const playMsg = isEn ? `Playing ${selected}` : `מנגן את ${selected}`;
+        await playInterruptible(r, playMsg, `${CONFIG.BASE_URL}/music/wait-loop`, {
+            voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice
+        });
         r.redirect(`${CONFIG.BASE_URL}/music/wait-loop`);
         return res.type("text/xml").send(r.toString());
     }
@@ -265,7 +315,11 @@ router.all("/browse-action", async (req, res) => {
         await removeLikedSong(caller, itemToRemove);
         browse.list = await getLikedSongs(caller);
         browse.index = 0;
-        await playInterruptible(r, "השיר הוסר.", `${CONFIG.BASE_URL}/music/browse`, { voice: user.settings?.hebrew_voice });
+        console.log(`[Music] 🗑️ [Call: ${req.body.CallSid}] Removed from likes: "${itemToRemove}"`);
+        const remMsg = isEn ? "Track removed from favorites." : "השיר הוסר.";
+        await playInterruptible(r, remMsg, `${CONFIG.BASE_URL}/music/browse`, {
+            voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice
+        });
         r.redirect(`${CONFIG.BASE_URL}/music/browse`);
         return res.type("text/xml").send(r.toString());
     }

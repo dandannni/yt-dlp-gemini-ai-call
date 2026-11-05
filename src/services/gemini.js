@@ -42,7 +42,12 @@ const ROUTER_TOOL = {
  * Direct Audio -> Intent + Query using Gemini Multimodal Function Calling
  */
 export async function analyzeAudioIntent(base64Audio) {
-    if (CONFIG.GEMINI_KEYS.length === 0) return null;
+    if (CONFIG.GEMINI_KEYS.length === 0) {
+        console.warn("[Gemini] ⚠️ No GEMINI_API_KEY configured!");
+        return null;
+    }
+
+    console.log(`[Gemini] 🧠 Routing audio intent using Gemini...`);
 
     for (const key of CONFIG.GEMINI_KEYS) {
         try {
@@ -59,10 +64,11 @@ export async function analyzeAudioIntent(base64Audio) {
 
             const call = result.response.functionCalls()?.[0];
             if (call && call.name === "route_request") {
+                console.log(`[Gemini] 🎯 Audio Intent: "${call.args.intent}", Query: "${call.args.query}"`);
                 return call.args;
             }
         } catch (e) {
-            console.error("Gemini Router error with key:", e.message);
+            console.error("[Gemini] ❌ Router error with key:", e.message);
         }
     }
     return null;
@@ -73,12 +79,15 @@ export async function analyzeAudioIntent(base64Audio) {
  */
 export async function chatWithGemini(phone, userInputText, customHistory = null) {
     const user = await getUser(phone);
+    const isEn = user.settings?.language !== "he";
     const presetKey = user.settings?.system_prompt_preset || "default";
     const systemPrompt = SYSTEM_PRESETS[presetKey] || SYSTEM_PRESETS.default;
     const modelName = user.settings?.model || "gemini-2.5-flash";
 
     await saveChatHistory(phone, "user", userInputText);
     const history = customHistory || (await getUser(phone)).chat_history || [];
+
+    console.log(`[Gemini] 💬 Chatting with "${modelName}" for: "${userInputText}" (Lang: ${isEn ? "English" : "Hebrew"})`);
 
     for (const key of CONFIG.GEMINI_KEYS) {
         try {
@@ -96,14 +105,17 @@ export async function chatWithGemini(phone, userInputText, customHistory = null)
             const result = await chat.sendMessage(userInputText);
             const replyText = result.response.text().replace(/[*_#`]/g, "").trim();
 
+            console.log(`[Gemini] ✅ Reply generated (${replyText.length} chars)`);
             await saveChatHistory(phone, "model", replyText);
             return replyText;
         } catch (e) {
-            console.error("Gemini Chat error with key:", e.message);
+            console.error("[Gemini] ❌ Chat error with key:", e.message);
         }
     }
 
-    return "סליחה, נתקלתי בבעיה בחיבור. אנא נסה שוב בעוד רגע.";
+    return isEn 
+        ? "I apologize, I encountered a connection issue. Please try again in a moment."
+        : "סליחה, נתקלתי בבעיה בחיבור. אנא נסה שוב בעוד רגע.";
 }
 
 /**

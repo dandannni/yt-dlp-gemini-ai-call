@@ -28,6 +28,16 @@ const app = express();
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
+// Universal Request Logger for Render
+app.use((req, res, next) => {
+    if (!req.path.startsWith("/audio") && !req.path.startsWith("/music")) {
+        const caller = req.body?.From || req.query?.From || "web";
+        const digits = req.body?.Digits !== undefined ? `[DTMF: "${req.body.Digits}"]` : "";
+        console.log(`[HTTP] 📲 ${req.method} ${req.originalUrl} | Caller: ${caller} ${digits}`);
+    }
+    next();
+});
+
 // ------------------------------------------------------------------------------
 // Health Check & Uptime Monitor
 // ------------------------------------------------------------------------------
