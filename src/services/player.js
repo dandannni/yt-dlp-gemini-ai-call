@@ -48,12 +48,16 @@ export function handleStreamAudio(req, res) {
     res.setHeader("Expires", "0");
     res.setHeader("Transfer-Encoding", "chunked");
 
-    const ffmpegArgs = [];
+    const ffmpegArgs = [
+        "-reconnect", "1",
+        "-reconnect_streamed", "1",
+        "-reconnect_delay_max", "5",
+        "-i", fileUrl
+    ];
+
     if (offset > 0) {
         ffmpegArgs.push("-ss", offset.toString());
     }
-
-    ffmpegArgs.push("-i", fileUrl);
 
     if (volume !== 1.0) {
         ffmpegArgs.push("-filter:a", `volume=${volume}`);

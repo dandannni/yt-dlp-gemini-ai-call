@@ -1,9 +1,9 @@
 import express from "express";
 import twilio from "twilio";
 import { CONFIG } from "../config.js";
-import { gatherPlayOrSay, playInterruptible } from "../services/tts.js";
+import { gatherPlayOrSay, playInterruptible, generateTTS } from "../services/tts.js";
 import { getPlayerSession } from "../services/player.js";
-import { searchAndDownloadMusic, musicQueue } from "../services/music.js";
+import { searchAndDownloadMusic, musicQueue, normalizeMusicQuery } from "../services/music.js";
 import { analyzeAudioIntent } from "../services/gemini.js";
 import {
     getUser,
@@ -38,8 +38,8 @@ router.all("/menu", async (req, res) => {
     console.log(`[Music] 🎵 [Call: ${req.body.CallSid}] Opening Music Menu (Lang: ${isEn ? "English" : "Hebrew"})`);
 
     const prompt = isEn
-        ? "Music Menu. Press 1 to search for a song, 2 for history, 3 for saved songs, 4 for playlists, 5 for search settings, Star for main menu."
-        : "מוזיקה: 1 לחיפוש שיר, 2 להיסטוריה, 3 לשירים שמורים, 4 לפלייליסטים, 5 להגדרות, כוכבית לתפריט הראשי.";
+        ? "Music Menu. Press 1 to search for a song, 2 for history, 3 for saved songs, 4 for playlists, Star for main menu."
+        : "מוזיקה: 1 לחיפוש שיר, 2 להיסטוריה, 3 לשירים שמורים, 4 לפלייליסטים, כוכבית לתפריט הראשי.";
 
     await gatherPlayOrSay(
         r,
@@ -68,17 +68,39 @@ router.all("/menu-action", async (req, res) => {
     console.log(`[Music] 🔘 [Call: ${req.body.CallSid}] Music menu key: "${key}"`);
 
     if (key === "1") {
-        // Search song via voice recording
-        const speakPrompt = isEn ? "Say the song name or artist after the beep, then press pound." : "אמור את שם השיר או האמן לאחר הצפצוף, ולחץ סולמית.";
-        await playInterruptible(r, speakPrompt, `${CONFIG.BASE_URL}/music/record-search`, {
-            voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice
+        // High-speed voice search with Twilio telecom ASR and # key
+        const speakPrompt = isEn 
+            ? "Say the song name or artist, then press pound." 
+            : "אמור את שם השיר או האמן, ולחץ סולמית.";
+        
+        const g = r.gather({
+            input: "speech dtmf",
+            action: `${CONFIG.BASE_URL}/music/process-search`,
+            method: "POST",
+            finishOnKey: "#",
+            speechTimeout: "auto",
+            timeout: 8,
+            language: isEn ? "en-US" : "he-IL"
         });
+
+        const promptFile = await generateTTS(speakPrompt, {
+            voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice,
+            isDynamic: false
+        });
+
+        if (promptFile) {
+            g.play(`${CONFIG.BASE_URL}/audio/${promptFile}`);
+        } else {
+            g.say({ language: isEn ? "en-US" : "he-IL" }, speakPrompt);
+        }
+
+        // Secondary fallback to recording if user didn't speak during gather
         r.record({
             action: `${CONFIG.BASE_URL}/music/process-search`,
             method: "POST",
             maxLength: 30,
-            playBeep: true,
-            timeout: 15,
+            playBeep: false,
+            timeout: 10,
             finishOnKey: "#"
         });
         return res.type("text/xml").send(r.toString());
@@ -117,13 +139,8 @@ router.all("/menu-action", async (req, res) => {
     }
 
     if (key === "5") {
-        // Toggle search engine setting
-        const current = user.settings?.search_engine || "scsearch1:";
-        const newEngine = current.startsWith("scsearch") ? "ytsearch1:" : "scsearch1:";
-        await updateUserSettings(caller, { search_engine: newEngine });
-        const name = newEngine.startsWith("scsearch") ? "SoundCloud" : "YouTube";
-        console.log(`[Music] 🔍 [Call: ${req.body.CallSid}] Search engine toggled to: ${name}`);
-        const msg = isEn ? `Search engine set to ${name}.` : `מנוע החיפוש הוגדר ל-${newEngine.startsWith("scsearch") ? "סאונדקלאוד" : "יוטיוב"}.`;
+        await updateUserSettings(caller, { search_engine: "ytsearch1:" });
+        const msg = isEn ? "High-speed YouTube engine is active." : "מנוע יוטיוב המהיר פעיל.";
         await playInterruptible(r, msg, `${CONFIG.BASE_URL}/music/menu`, {
             voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice
         });
@@ -144,14 +161,14 @@ router.all("/process-search", async (req, res) => {
     const user = await getUser(caller);
     const isEn = user.settings?.language !== "he";
     const recordingUrl = req.body.RecordingUrl;
+    let query = req.body.SpeechResult || null;
+    let isLong = false;
 
-    if (!recordingUrl) {
+    // Check DTMF star (*) abort
+    if (req.body.Digits === "*") {
         r.redirect(`${CONFIG.BASE_URL}/music/menu`);
         return res.type("text/xml").send(r.toString());
     }
-
-    let query = req.body.SpeechResult || null;
-    let isLong = false;
 
     if (!query && recordingUrl) {
         let base64Audio = null;
@@ -172,6 +189,10 @@ router.all("/process-search", async (req, res) => {
         }
     }
 
+    if (query) {
+        query = normalizeMusicQuery(query);
+    }
+
     if (!query) {
         console.warn(`[Music] ⚠️ [Call: ${req.body.CallSid}] No speech recognized`);
         const failMsg = isEn ? "Could not understand speech. Please try again." : "לא הצלחתי לזהות דיבור. אנא נסה שוב.";
@@ -182,15 +203,13 @@ router.all("/process-search", async (req, res) => {
         return res.type("text/xml").send(r.toString());
     }
 
-    console.log(`[Music] 🔍 [Call: ${req.body.CallSid}] Song search query: "${query}" (Long: ${isLong})`);
+    console.log(`[Music] 🔍 [Call: ${req.body.CallSid}] Song search query: "${query}" (Source: ${req.body.SpeechResult ? "Twilio ASR" : "Audio Model"})`);
 
     await saveMusicHistory(caller, query);
-    searchAndDownloadMusic(req.body.CallSid, query, {
-        isLong,
-        engine: user.settings?.search_engine || "ytsearch1:"
-    });
+    searchAndDownloadMusic(req.body.CallSid, query, { isLong });
 
-    const searchPrompt = isEn ? `Finding ${query}...` : `מחפש את ${query}...`;
+    // Static pre-cached transition prompt (0 ms TTS latency!)
+    const searchPrompt = isEn ? "Searching for your song now..." : "מחפש את השיר כעת...";
     await playInterruptible(r, searchPrompt, `${CONFIG.BASE_URL}/music/wait-loop`, {
         voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice
     });
@@ -213,8 +232,14 @@ router.all("/wait-loop", async (req, res) => {
         return res.type("text/xml").send(r.toString());
     }
 
+    // Fast-path: wait up to 2.5s in 250ms increments to catch immediate completion
+    for (let i = 0; i < 10; i++) {
+        if (task.status === "done" || task.status === "error") break;
+        await new Promise(resolve => setTimeout(resolve, 250));
+    }
+
     if (task.status === "done") {
-        console.log(`[Music] 🚀 [Call: ${req.body.CallSid}] Track ready. Handing off to Player Engine: ${task.url}`);
+        console.log(`[Music] 🚀 [Call: ${req.body.CallSid}] Handing off to Player Engine: ${task.url}`);
         const playerState = getPlayerSession(req.body.CallSid);
         playerState.type = "music";
         playerState.title = task.query;
@@ -228,8 +253,8 @@ router.all("/wait-loop", async (req, res) => {
         return res.type("text/xml").send(r.toString());
     }
 
-    if (task.status === "error" || (Date.now() - task.startTime > 50000)) {
-        console.warn(`[Music] ❌ [Call: ${req.body.CallSid}] Track download error or timeout for query: "${task.query}"`);
+    if (task.status === "error" || (Date.now() - task.startTime > 35000)) {
+        console.warn(`[Music] ❌ [Call: ${req.body.CallSid}] Song resolution error or timeout: "${task.query}"`);
         const errPrompt = isEn ? "Could not find the song. Please try another search." : "שגיאה במציאת השיר. אנא נסה שוב.";
         await playInterruptible(r, errPrompt, `${CONFIG.BASE_URL}/music/menu`, {
             voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice
@@ -238,7 +263,7 @@ router.all("/wait-loop", async (req, res) => {
         return res.type("text/xml").send(r.toString());
     }
 
-    r.pause({ length: 2 });
+    r.pause({ length: 1 });
     r.redirect(`${CONFIG.BASE_URL}/music/wait-loop`);
     res.type("text/xml").send(r.toString());
 });

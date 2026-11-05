@@ -83,14 +83,32 @@ router.all("/menu-action", async (req, res) => {
         session.currentTurnIndex = 0;
 
         const speakPrompt = isEn ? "Speak after the tone. Press pound when finished." : "דבר לאחר הצפצוף, ולחץ סולמית לסיום.";
-        await playInterruptible(r, speakPrompt, `${CONFIG.BASE_URL}/chat/record-prompt`, {
-            voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice
+        const g = r.gather({
+            input: "speech dtmf",
+            action: `${CONFIG.BASE_URL}/chat/process-speech`,
+            method: "POST",
+            finishOnKey: "#",
+            speechTimeout: "auto",
+            timeout: 8,
+            language: isEn ? "en-US" : "he-IL"
         });
+
+        const promptFile = await generateTTS(speakPrompt, {
+            voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice,
+            isDynamic: false
+        });
+
+        if (promptFile) {
+            g.play(`${CONFIG.BASE_URL}/audio/${promptFile}`);
+        } else {
+            g.say({ language: isEn ? "en-US" : "he-IL" }, speakPrompt);
+        }
+
         r.record({
             action: `${CONFIG.BASE_URL}/chat/process-speech`,
             method: "POST",
             maxLength: 300,
-            playBeep: true,
+            playBeep: false,
             timeout: 15,
             finishOnKey: "#"
         });
@@ -115,14 +133,32 @@ router.all("/menu-action", async (req, res) => {
         session.currentTurnIndex = Math.max(0, history.length - 1);
 
         const resumePrompt = isEn ? "Resuming previous chat. Speak after the tone, and press pound when finished." : "ממשיך שיחה קודמת. דבר לאחר הצפצוף, ולחץ סולמית לסיום.";
-        await playInterruptible(r, resumePrompt, `${CONFIG.BASE_URL}/chat/record-prompt`, {
-            voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice
+        const g = r.gather({
+            input: "speech dtmf",
+            action: `${CONFIG.BASE_URL}/chat/process-speech`,
+            method: "POST",
+            finishOnKey: "#",
+            speechTimeout: "auto",
+            timeout: 8,
+            language: isEn ? "en-US" : "he-IL"
         });
+
+        const promptFile = await generateTTS(resumePrompt, {
+            voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice,
+            isDynamic: false
+        });
+
+        if (promptFile) {
+            g.play(`${CONFIG.BASE_URL}/audio/${promptFile}`);
+        } else {
+            g.say({ language: isEn ? "en-US" : "he-IL" }, resumePrompt);
+        }
+
         r.record({
             action: `${CONFIG.BASE_URL}/chat/process-speech`,
             method: "POST",
             maxLength: 300,
-            playBeep: true,
+            playBeep: false,
             timeout: 15,
             finishOnKey: "#"
         });
@@ -166,14 +202,13 @@ router.all("/process-speech", async (req, res) => {
     const isEn = user.settings?.language !== "he";
     const session = getChatSession(req.body.CallSid);
     const recordingUrl = req.body.RecordingUrl;
+    let queryText = req.body.SpeechResult || null;
+    let intentData = null;
 
-    if (!recordingUrl) {
-        console.warn(`[Chat] ⚠️ [Call: ${req.body.CallSid}] Empty RecordingUrl received`);
+    if (req.body.Digits === "*") {
         r.redirect(`${CONFIG.BASE_URL}/chat/menu`);
         return res.type("text/xml").send(r.toString());
     }
-
-    let queryText = req.body.SpeechResult || null;
 
     if (!queryText && recordingUrl) {
         console.log(`[Chat] 🎙️ [Call: ${req.body.CallSid}] Speech recording received: ${recordingUrl}`);
@@ -188,7 +223,7 @@ router.all("/process-speech", async (req, res) => {
             console.error(`[Chat] ❌ Fetch recording error:`, e.message);
         }
 
-        const intentData = base64Audio ? await analyzeAudioIntent(base64Audio) : null;
+        intentData = base64Audio ? await analyzeAudioIntent(base64Audio) : null;
         if (intentData && intentData.query) {
             queryText = intentData.query;
         }
@@ -204,7 +239,7 @@ router.all("/process-speech", async (req, res) => {
         return res.type("text/xml").send(r.toString());
     }
 
-    console.log(`[Chat] 🧠 [Call: ${req.body.CallSid}] Query recognized: "${queryText}" (Intent: ${intentData?.intent || "chat"})`);
+    console.log(`[Chat] 🧠 [Call: ${req.body.CallSid}] Query recognized: "${queryText}" (Source: ${req.body.SpeechResult ? "Twilio ASR" : "Audio Model"})`);
 
     const replyText = await chatWithGemini(caller, queryText);
     console.log(`[Chat] 💬 [Call: ${req.body.CallSid}] Gemini replied: "${replyText.slice(0, 100)}..."`);
@@ -285,16 +320,34 @@ router.all("/post-reply-action", async (req, res) => {
     }
 
     if (key === "1") {
-        // Continue chat
+        // Continue chat with Gather speech and # key
         const speakPrompt = isEn ? "Speak after the tone. Press pound when finished." : "דבר לאחר הצפצוף, ולחץ סולמית לסיום.";
-        await playInterruptible(r, speakPrompt, `${CONFIG.BASE_URL}/chat/record-prompt`, {
-            voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice
+        const g = r.gather({
+            input: "speech dtmf",
+            action: `${CONFIG.BASE_URL}/chat/process-speech`,
+            method: "POST",
+            finishOnKey: "#",
+            speechTimeout: "auto",
+            timeout: 8,
+            language: isEn ? "en-US" : "he-IL"
         });
+
+        const promptFile = await generateTTS(speakPrompt, {
+            voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice,
+            isDynamic: false
+        });
+
+        if (promptFile) {
+            g.play(`${CONFIG.BASE_URL}/audio/${promptFile}`);
+        } else {
+            g.say({ language: isEn ? "en-US" : "he-IL" }, speakPrompt);
+        }
+
         r.record({
             action: `${CONFIG.BASE_URL}/chat/process-speech`,
             method: "POST",
             maxLength: 300,
-            playBeep: true,
+            playBeep: false,
             timeout: 15,
             finishOnKey: "#"
         });
@@ -533,9 +586,9 @@ router.all("/settings-action", async (req, res) => {
     }
 
     if (key === "2") {
-        // Model toggle (Gemini 2.5 Flash vs Gemini 2.5 Pro)
-        const currentModel = user.settings?.model || "gemini-2.5-flash";
-        const newModel = currentModel === "gemini-2.5-flash" ? "gemini-2.5-pro" : "gemini-2.5-flash";
+        // Model toggle (Gemini 1.5 Flash vs Gemini 2.0 Flash)
+        const currentModel = user.settings?.model || "gemini-1.5-flash";
+        const newModel = currentModel === "gemini-1.5-flash" ? "gemini-2.0-flash" : "gemini-1.5-flash";
         await updateUserSettings(caller, { model: newModel });
         console.log(`[Settings] AI Model changed to ${newModel}`);
         const msg = isEn ? `Model set to ${newModel}.` : `המודל הוגדר ל-${newModel}.`;

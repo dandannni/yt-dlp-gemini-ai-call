@@ -39,7 +39,7 @@ const ROUTER_TOOL = {
 };
 
 // High-quota models (1,500 requests/day each)
-const FAST_MODELS = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-2.5-flash"];
+const FAST_MODELS = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"];
 
 /**
  * Direct Audio -> Intent + Query using Gemini Multimodal Function Calling

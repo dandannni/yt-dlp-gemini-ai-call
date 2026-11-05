@@ -141,20 +141,51 @@ export async function playInterruptible(r, text, actionUrl, userOptions = {}) {
  */
 export async function warmupStaticPrompts() {
     console.log("[TTS] ⚡ Warming up static prompt audio cache in background...");
-    const corePrompts = [
+    const englishPrompts = [
         "Welcome to Voice OS. Press 1 for AI Assistant, 2 for Music, 3 for Podcasts, 4 for News, or 0 for Settings.",
-        "Music Menu. Press 1 to search for a song, 2 for history, 3 for saved songs, 4 for playlists, 5 for search settings, Star for main menu.",
+        "Music Menu. Press 1 to search for a song, 2 for history, 3 for saved songs, 4 for playlists, Star for main menu.",
         "AI Assistant. Press 1 for a new chat, 2 to continue recent chat, 3 for saved chats, 4 for settings, Star for main menu.",
         "Podcasts. Press 1 for Osim Historia, 2 for Bizman Sheavadtem, 3 for Ehad Bayom, 4 for Osim Technologia, 5 for Hateshuva, Star for main menu.",
-        "Say the song name or artist after the beep, then press pound.",
-        "Speak after the tone. Press pound when finished."
+        "Say the song name or artist, then press pound.",
+        "Speak after the tone. Press pound when finished.",
+        "Searching for your song now...",
+        "Finished. Press 8 to save, or Star for menu.",
+        "Paused. Press 5 to resume, or Star for menu.",
+        "Could not find the song. Please try another search.",
+        "Could not understand speech. Please try again.",
+        "1 to continue, 3 to save, 4 for previous turn, 6 for next turn, 7 for summary, Star for menu.",
+        "Song saved to favorites."
     ];
-    for (const p of corePrompts) {
+
+    const hebrewPrompts = [
+        "שלום. 1 לשיחה עם בינה מלאכותית, 2 למוזיקה, 3 לפודקאסטים, 4 למבזקי חדשות, או 0 להגדרות.",
+        "מוזיקה: 1 לחיפוש שיר, 2 להיסטוריה, 3 לשירים שמורים, 4 לפלייליסטים, כוכבית לתפריט הראשי.",
+        "שיחה עם בינה מלאכותית: 1 לשיחה חדשה, 2 להמשך שיחה מהיסטוריה, 3 לשיחות שמורות, 4 להגדרות, כוכבית לתפריט הראשי.",
+        "פודקאסטים: 1 לעושים היסטוריה, 2 לבזמן שעבדתם, 3 לאחד ביום, 4 לעושים טכנולוגיה, 5 לתשובה, כוכבית לתפריט הראשי.",
+        "אמור את שם השיר או האמן, ולחץ סולמית.",
+        "דבר לאחר הצפצוף, ולחץ סולמית לסיום.",
+        "מחפש את השיר כעת...",
+        "ההשמעה הסתיימה. לחץ 8 לשמירה, או כוכבית לתפריט.",
+        "מושהה. לחץ 5 להמשך, או כוכבית לתפריט.",
+        "שגיאה במציאת השיר. אנא נסה שוב.",
+        "לא הצלחתי לזהות דיבור. אנא נסה שוב.",
+        "1 להמשך, 3 לשמירה, 4 לקודם, 6 להבא, 7 לסיכום, כוכבית לתפריט.",
+        "השיר נשמר במועדפים."
+    ];
+
+    for (const p of englishPrompts) {
         try {
             await generateTTS(p, { isDynamic: false, voice: VOICES.ENGLISH.Christopher });
         } catch (e) {}
     }
-    console.log("[TTS] ✅ Core prompts ready in cache!");
+
+    for (const p of hebrewPrompts) {
+        try {
+            await generateTTS(p, { isDynamic: false, voice: VOICES.HEBREW.Hila });
+        } catch (e) {}
+    }
+
+    console.log("[TTS] ✅ Core prompts ready in cache (English + Hebrew)!");
 }
 
 

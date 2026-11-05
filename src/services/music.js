@@ -7,8 +7,19 @@ export const musicQueue = new Map();
 const streamUrlCache = new Map();
 const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 
+export function normalizeMusicQuery(raw) {
+    if (!raw) return "";
+    let q = raw.trim();
+    // Strip common English voice prefixes
+    q = q.replace(/^(can you |please )?(play|stream|listen to|hear|find|search for)\s+(the song\s+|the track\s+|song\s+)?/i, "");
+    // Strip common Hebrew voice prefixes
+    q = q.replace(/^(אפשר לשמוע את|תשמיע לי את|תשמיע את|נגן את|שים לי את|שים את|אני רוצה לשמוע את|שיר של|שיר)\s+/i, "");
+    return q.trim() || raw.trim();
+}
+
 function getTrackHash(query) {
-    return crypto.createHash("md5").update((query || "").trim().toLowerCase()).digest("hex").slice(0, 12);
+    const clean = normalizeMusicQuery(query);
+    return crypto.createHash("md5").update(clean.toLowerCase()).digest("hex").slice(0, 12);
 }
 
 /**
@@ -17,7 +28,8 @@ function getTrackHash(query) {
 function extractYouTubeStream(query, attempt = 1) {
     return new Promise((resolve, reject) => {
         const start = Date.now();
-        const searchQuery = attempt === 2 ? `${query} audio` : query;
+        const cleanQuery = normalizeMusicQuery(query);
+        const searchQuery = attempt === 2 ? `${cleanQuery} audio` : cleanQuery;
         const searchArg = `ytsearch1:${searchQuery}`;
 
         const args = [
