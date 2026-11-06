@@ -1,4 +1,6 @@
 import { spawn } from "child_process";
+import path from "path";
+import fs from "fs";
 import twilio from "twilio";
 import { CONFIG } from "../config.js";
 import { gatherPlayOrSay, playInterruptible } from "./tts.js";
@@ -39,7 +41,19 @@ export function handleStreamAudio(req, res) {
         return res.status(400).send("Missing audio url");
     }
 
-    console.log(`[Player] 🎧 Streaming audio: offset=${offset.toFixed(1)}s, volume=${volume.toFixed(2)}, url=${fileUrl.slice(0, 60)}...`);
+    // Resolve local file if URL points to our own audio storage
+    let localFilePath = null;
+    if (fileUrl.includes("/audio/") || fileUrl.includes("/music/")) {
+        const parts = fileUrl.split("/audio/")[1] || fileUrl.split("/music/")[1];
+        if (parts) {
+            const candidate = path.resolve(CONFIG.DOWNLOAD_DIR, parts.split("?")[0]);
+            if (fs.existsSync(candidate)) {
+                localFilePath = candidate;
+            }
+        }
+    }
+
+    console.log(`[Player] 🎧 Streaming audio (${localFilePath ? "Local File" : "Remote Stream"}): offset=${offset.toFixed(1)}s, volume=${volume.toFixed(2)}, source=${(localFilePath || fileUrl).slice(0, 60)}...`);
 
     // Strict Anti-Cache Headers so Twilio NEVER plays stale buffers
     res.setHeader("Content-Type", "audio/mpeg");
@@ -48,15 +62,24 @@ export function handleStreamAudio(req, res) {
     res.setHeader("Expires", "0");
     res.setHeader("Transfer-Encoding", "chunked");
 
-    const ffmpegArgs = [
-        "-reconnect", "1",
-        "-reconnect_streamed", "1",
-        "-reconnect_delay_max", "5",
-        "-i", fileUrl
-    ];
-
-    if (offset > 0) {
-        ffmpegArgs.push("-ss", offset.toString());
+    let ffmpegArgs = [];
+    if (localFilePath) {
+        // Fast local seek
+        if (offset > 0) {
+            ffmpegArgs.push("-ss", offset.toString());
+        }
+        ffmpegArgs.push("-i", localFilePath);
+    } else {
+        // Remote HTTP stream
+        ffmpegArgs.push(
+            "-reconnect", "1",
+            "-reconnect_streamed", "1",
+            "-reconnect_delay_max", "5",
+            "-i", fileUrl
+        );
+        if (offset > 0) {
+            ffmpegArgs.push("-ss", offset.toString());
+        }
     }
 
     if (volume !== 1.0) {
@@ -99,7 +122,7 @@ export async function handlePlayerPlay(req, res) {
 
     if (!session.fileUrl) {
         console.warn(`[Player] [Call: ${req.body.CallSid}] No fileUrl found in session. Redirecting to menu.`);
-        r.redirect(`${CONFIG.BASE_URL}/twiml`);
+        r.redirect(session.returnUrl || `${CONFIG.BASE_URL}/twiml`);
         return res.type("text/xml").send(r.toString());
     }
 
@@ -278,20 +301,24 @@ export async function handlePlayerSave(req, res) {
     const isEn = user.settings?.language !== "he";
     const key = req.body.Digits;
 
-    if (key === "1") {
-        if (session.title) {
-            await saveLikedSong(phone, session.title);
-            console.log(`[Player] ❤️ [Call: ${req.body.CallSid}] Saved to favorites: "${session.title}"`);
-            const msg = isEn ? "Saved to favorites." : "השיר נשמר במועדפים.";
-            await playInterruptible(r, msg, `${CONFIG.BASE_URL}/player-play`, { voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice });
+    try {
+        if (key === "1") {
+            if (session.title) {
+                await saveLikedSong(phone, session.title);
+                console.log(`[Player] ❤️ [Call: ${req.body.CallSid}] Saved to favorites: "${session.title}"`);
+                const msg = isEn ? "Song saved to favorites." : "השיר נשמר במועדפים.";
+                await playInterruptible(r, msg, `${CONFIG.BASE_URL}/player-play`, { voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice });
+            }
+        } else if (key === "2") {
+            if (session.title) {
+                await addToPlaylist(phone, "My Playlist", session.title);
+                console.log(`[Player] 📋 [Call: ${req.body.CallSid}] Added to playlist: "${session.title}"`);
+                const msg = isEn ? "Added to playlist." : "השיר נוסף לפלייליסט.";
+                await playInterruptible(r, msg, `${CONFIG.BASE_URL}/player-play`, { voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice });
+            }
         }
-    } else if (key === "2") {
-        if (session.title) {
-            await addToPlaylist(phone, "My Playlist", session.title);
-            console.log(`[Player] 📋 [Call: ${req.body.CallSid}] Added to playlist: "${session.title}"`);
-            const msg = isEn ? "Added to playlist." : "השיר נוסף לפלייליסט.";
-            await playInterruptible(r, msg, `${CONFIG.BASE_URL}/player-play`, { voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice });
-        }
+    } catch (err) {
+        console.error(`[Player] ❌ Error saving song:`, err.message);
     }
 
     r.redirect(`${CONFIG.BASE_URL}/player-play`);
@@ -308,27 +335,38 @@ export async function handlePlayerPostFinish(req, res) {
     const user = await getUser(phone);
     const isEn = user.settings?.language !== "he";
     const key = req.body.Digits;
+    const returnDest = session.returnUrl || `${CONFIG.BASE_URL}/twiml`;
 
     console.log(`[Player] 🏁 [Call: ${req.body.CallSid}] Post-finish action received. Key: "${key}"`);
 
-    if (key === "8") {
-        if (session.title) {
-            await saveLikedSong(phone, session.title);
-            console.log(`[Player] ❤️ [Call: ${req.body.CallSid}] Saved track to favorites: "${session.title}"`);
-            const msg = isEn ? "Song saved to favorites." : "השיר נשמר במועדפים.";
-            await playInterruptible(r, msg, `${CONFIG.BASE_URL}/twiml`, {
-                voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice
-            });
+    try {
+        if (key === "8") {
+            if (session && session.title) {
+                await saveLikedSong(phone, session.title);
+                console.log(`[Player] ❤️ [Call: ${req.body.CallSid}] Saved track to favorites: "${session.title}"`);
+                const msg = isEn ? "Song saved to favorites." : "השיר נשמר במועדפים.";
+                await playInterruptible(r, msg, returnDest, {
+                    voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice
+                });
+            } else {
+                console.warn(`[Player] ⚠️ [Call: ${req.body.CallSid}] Key 8 pressed but no active song title`);
+                const msg = isEn ? "No active song to save." : "אין שיר פעיל לשמירה.";
+                await playInterruptible(r, msg, returnDest, {
+                    voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice
+                });
+            }
+            r.redirect(returnDest);
+            return res.type("text/xml").send(r.toString());
         }
-        r.redirect(`${CONFIG.BASE_URL}/twiml`);
-        return res.type("text/xml").send(r.toString());
+
+        if (key === "*") {
+            r.redirect(returnDest);
+            return res.type("text/xml").send(r.toString());
+        }
+    } catch (err) {
+        console.error(`[Player] ❌ Error in post-finish handler:`, err.message);
     }
 
-    if (key === "*") {
-        r.redirect(`${CONFIG.BASE_URL}/twiml`);
-        return res.type("text/xml").send(r.toString());
-    }
-
-    r.redirect(`${CONFIG.BASE_URL}/twiml`);
+    r.redirect(returnDest);
     res.type("text/xml").send(r.toString());
 }

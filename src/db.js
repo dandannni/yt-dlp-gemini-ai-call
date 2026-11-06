@@ -135,9 +135,10 @@ async function updateUser(phone, updateModifier) {
 
     if (isMongoConnected && usersCollection) {
         try {
+            const { _id, ...updateData } = user;
             await usersCollection.updateOne(
                 { phone },
-                { $set: user },
+                { $set: updateData },
                 { upsert: true }
             );
         } catch (e) {
