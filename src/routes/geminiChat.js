@@ -76,39 +76,22 @@ router.all("/menu-action", async (req, res) => {
     console.log(`[Chat] 🔘 [Call: ${req.body.CallSid}] Chat menu key: "${key}"`);
 
     if (key === "1") {
-        // Start brand new chat
+        // Start brand new chat via voice recording (Zero Twilio ASR cost)
         console.log(`[Chat] 🆕 [Call: ${req.body.CallSid}] Starting brand new chat session`);
         await clearChatHistory(caller);
         session.activeTurns = [];
         session.currentTurnIndex = 0;
 
         const speakPrompt = isEn ? "Speak after the tone. Press pound when finished." : "דבר לאחר הצפצוף, ולחץ סולמית לסיום.";
-        const g = r.gather({
-            input: "speech dtmf",
-            action: `${CONFIG.BASE_URL}/chat/process-speech`,
-            method: "POST",
-            finishOnKey: "#",
-            speechTimeout: "auto",
-            timeout: 8,
-            language: isEn ? "en-US" : "he-IL"
+        await playInterruptible(r, speakPrompt, `${CONFIG.BASE_URL}/chat/record-prompt`, {
+            voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice
         });
-
-        const promptFile = await generateTTS(speakPrompt, {
-            voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice,
-            isDynamic: false
-        });
-
-        if (promptFile) {
-            g.play(`${CONFIG.BASE_URL}/audio/${promptFile}`);
-        } else {
-            g.say({ language: isEn ? "en-US" : "he-IL" }, speakPrompt);
-        }
 
         r.record({
             action: `${CONFIG.BASE_URL}/chat/process-speech`,
             method: "POST",
             maxLength: 300,
-            playBeep: false,
+            playBeep: true,
             timeout: 15,
             finishOnKey: "#"
         });
@@ -133,32 +116,15 @@ router.all("/menu-action", async (req, res) => {
         session.currentTurnIndex = Math.max(0, history.length - 1);
 
         const resumePrompt = isEn ? "Resuming previous chat. Speak after the tone, and press pound when finished." : "ממשיך שיחה קודמת. דבר לאחר הצפצוף, ולחץ סולמית לסיום.";
-        const g = r.gather({
-            input: "speech dtmf",
-            action: `${CONFIG.BASE_URL}/chat/process-speech`,
-            method: "POST",
-            finishOnKey: "#",
-            speechTimeout: "auto",
-            timeout: 8,
-            language: isEn ? "en-US" : "he-IL"
+        await playInterruptible(r, resumePrompt, `${CONFIG.BASE_URL}/chat/record-prompt`, {
+            voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice
         });
-
-        const promptFile = await generateTTS(resumePrompt, {
-            voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice,
-            isDynamic: false
-        });
-
-        if (promptFile) {
-            g.play(`${CONFIG.BASE_URL}/audio/${promptFile}`);
-        } else {
-            g.say({ language: isEn ? "en-US" : "he-IL" }, resumePrompt);
-        }
 
         r.record({
             action: `${CONFIG.BASE_URL}/chat/process-speech`,
             method: "POST",
             maxLength: 300,
-            playBeep: false,
+            playBeep: true,
             timeout: 15,
             finishOnKey: "#"
         });
@@ -223,7 +189,7 @@ router.all("/process-speech", async (req, res) => {
             console.error(`[Chat] ❌ Fetch recording error:`, e.message);
         }
 
-        intentData = base64Audio ? await analyzeAudioIntent(base64Audio) : null;
+        intentData = base64Audio ? await analyzeAudioIntent(base64Audio, user.settings?.model) : null;
         if (intentData && intentData.query) {
             queryText = intentData.query;
         }
@@ -320,34 +286,17 @@ router.all("/post-reply-action", async (req, res) => {
     }
 
     if (key === "1") {
-        // Continue chat with Gather speech and # key
+        // Continue chat via voice recording (Zero Twilio ASR cost)
         const speakPrompt = isEn ? "Speak after the tone. Press pound when finished." : "דבר לאחר הצפצוף, ולחץ סולמית לסיום.";
-        const g = r.gather({
-            input: "speech dtmf",
-            action: `${CONFIG.BASE_URL}/chat/process-speech`,
-            method: "POST",
-            finishOnKey: "#",
-            speechTimeout: "auto",
-            timeout: 8,
-            language: isEn ? "en-US" : "he-IL"
+        await playInterruptible(r, speakPrompt, `${CONFIG.BASE_URL}/chat/record-prompt`, {
+            voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice
         });
-
-        const promptFile = await generateTTS(speakPrompt, {
-            voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice,
-            isDynamic: false
-        });
-
-        if (promptFile) {
-            g.play(`${CONFIG.BASE_URL}/audio/${promptFile}`);
-        } else {
-            g.say({ language: isEn ? "en-US" : "he-IL" }, speakPrompt);
-        }
 
         r.record({
             action: `${CONFIG.BASE_URL}/chat/process-speech`,
             method: "POST",
             maxLength: 300,
-            playBeep: false,
+            playBeep: true,
             timeout: 15,
             finishOnKey: "#"
         });
@@ -586,16 +535,8 @@ router.all("/settings-action", async (req, res) => {
     }
 
     if (key === "2") {
-        // Model toggle (Gemini 1.5 Flash vs Gemini 2.0 Flash)
-        const currentModel = user.settings?.model || "gemini-1.5-flash";
-        const newModel = currentModel === "gemini-1.5-flash" ? "gemini-2.0-flash" : "gemini-1.5-flash";
-        await updateUserSettings(caller, { model: newModel });
-        console.log(`[Settings] AI Model changed to ${newModel}`);
-        const msg = isEn ? `Model set to ${newModel}.` : `המודל הוגדר ל-${newModel}.`;
-        await playInterruptible(r, msg, `${CONFIG.BASE_URL}/chat/settings`, {
-            voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice
-        });
-        r.redirect(`${CONFIG.BASE_URL}/chat/settings`);
+        // AI Model Selection Sub-menu
+        r.redirect(`${CONFIG.BASE_URL}/chat/models-menu`);
         return res.type("text/xml").send(r.toString());
     }
 
@@ -647,6 +588,74 @@ router.all("/settings-action", async (req, res) => {
     }
 
     r.redirect(`${CONFIG.BASE_URL}/twiml`);
+    res.type("text/xml").send(r.toString());
+});
+
+/**
+ * AI Model Selection Sub-menu: /chat/models-menu
+ */
+router.all("/models-menu", async (req, res) => {
+    const r = new VoiceResponse();
+    const caller = req.body.From;
+    const user = await getUser(caller);
+    const isEn = user.settings?.language !== "he";
+    const currentModel = user.settings?.model || "gemini-2.5-flash";
+
+    console.log(`[Settings] 🤖 [Call: ${req.body.CallSid}] Opening Model Menu (Current: ${currentModel})`);
+
+    const prompt = isEn
+        ? `AI Model Menu. Current model is ${currentModel}. Press 1 for Gemini 2.5 Flash, 2 for Gemini 2.5 Pro, 3 for Gemini 2.0 Flash, 4 for Gemini 1.5 Flash, 5 for Gemini 1.5 Pro, Star to return.`
+        : `תפריט מודלים. המודל הנוכחי הוא ${currentModel}. לחץ 1 לג'מיני 2.5 פלאש, 2 לג'מיני 2.5 פרו, 3 לג'מיני 2.0 פלאש, 4 לג'מיני 1.5 פלאש, 5 לג'מיני 1.5 פרו, כוכבית לחזרה.`;
+
+    await gatherPlayOrSay(
+        r,
+        prompt,
+        `${CONFIG.BASE_URL}/chat/models-action`,
+        1,
+        8,
+        { voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice }
+    );
+
+    r.redirect(`${CONFIG.BASE_URL}/chat/settings`);
+    res.type("text/xml").send(r.toString());
+});
+
+/**
+ * AI Model Selection Action: /chat/models-action
+ */
+router.all("/models-action", async (req, res) => {
+    const r = new VoiceResponse();
+    const caller = req.body.From;
+    const user = await getUser(caller);
+    const isEn = user.settings?.language !== "he";
+    const key = req.body.Digits;
+
+    console.log(`[Settings] 🔘 [Call: ${req.body.CallSid}] Model selected key: "${key}"`);
+
+    if (key === "*") {
+        r.redirect(`${CONFIG.BASE_URL}/chat/settings`);
+        return res.type("text/xml").send(r.toString());
+    }
+
+    const modelMap = {
+        "1": "gemini-2.5-flash",
+        "2": "gemini-2.5-pro",
+        "3": "gemini-2.0-flash",
+        "4": "gemini-1.5-flash",
+        "5": "gemini-1.5-pro"
+    };
+
+    const selectedModel = modelMap[key];
+    if (selectedModel) {
+        await updateUserSettings(caller, { model: selectedModel });
+        console.log(`[Settings] ✅ Model updated to: ${selectedModel}`);
+        const msg = isEn ? `Model set to ${selectedModel}.` : `המודל הוגדר ל-${selectedModel}.`;
+        await playInterruptible(r, msg, `${CONFIG.BASE_URL}/chat/settings`, {
+            voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice
+        });
+    }
+
+    r.redirect(`${CONFIG.BASE_URL}/chat/settings`);
     res.type("text/xml").send(r.toString());
 });
 

@@ -21,7 +21,7 @@ export function getDefaultUserData(phone) {
         },
         settings: {
             language: "en", // Default to English ('en' | 'he')
-            model: "gemini-1.5-flash",
+            model: "gemini-2.5-flash",
             hebrew_voice: "he-IL-HilaNeural",
             english_voice: "en-US-ChristopherNeural",
             search_engine: "ytsearch1:", // Default to YouTube search
@@ -95,8 +95,8 @@ export async function getUser(phone) {
             }
             if (!doc.settings) doc.settings = {};
             if (!doc.settings.language) doc.settings.language = "en";
-            if (!doc.settings.model || doc.settings.model.includes("2.5")) {
-                doc.settings.model = "gemini-1.5-flash";
+            if (!doc.settings.model) {
+                doc.settings.model = "gemini-2.5-flash";
             }
             if (!doc.settings.search_engine || doc.settings.search_engine.startsWith("scsearch")) {
                 doc.settings.search_engine = "ytsearch1:";
@@ -116,8 +116,8 @@ export async function getUser(phone) {
     const localUser = localCache.users[phone];
     if (!localUser.settings) localUser.settings = {};
     if (!localUser.settings.language) localUser.settings.language = "en";
-    if (!localUser.settings.model || localUser.settings.model.includes("2.5")) {
-        localUser.settings.model = "gemini-1.5-flash";
+    if (!localUser.settings.model) {
+        localUser.settings.model = "gemini-2.5-flash";
     }
     if (!localUser.settings.search_engine || localUser.settings.search_engine.startsWith("scsearch")) {
         localUser.settings.search_engine = "ytsearch1:";

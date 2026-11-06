@@ -68,39 +68,21 @@ router.all("/menu-action", async (req, res) => {
     console.log(`[Music] 🔘 [Call: ${req.body.CallSid}] Music menu key: "${key}"`);
 
     if (key === "1") {
-        // High-speed voice search with Twilio telecom ASR and # key
+        // Zero-cost voice search via Twilio Record with # finish key
         const speakPrompt = isEn 
-            ? "Say the song name or artist, then press pound." 
-            : "אמור את שם השיר או האמן, ולחץ סולמית.";
+            ? "Say the song name or artist after the beep, then press pound." 
+            : "אמור את שם השיר או האמן לאחר הצפצוף, ולחץ סולמית.";
         
-        const g = r.gather({
-            input: "speech dtmf",
-            action: `${CONFIG.BASE_URL}/music/process-search`,
-            method: "POST",
-            finishOnKey: "#",
-            speechTimeout: "auto",
-            timeout: 8,
-            language: isEn ? "en-US" : "he-IL"
+        await playInterruptible(r, speakPrompt, `${CONFIG.BASE_URL}/music/record-search`, {
+            voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice
         });
 
-        const promptFile = await generateTTS(speakPrompt, {
-            voice: isEn ? user.settings?.english_voice : user.settings?.hebrew_voice,
-            isDynamic: false
-        });
-
-        if (promptFile) {
-            g.play(`${CONFIG.BASE_URL}/audio/${promptFile}`);
-        } else {
-            g.say({ language: isEn ? "en-US" : "he-IL" }, speakPrompt);
-        }
-
-        // Secondary fallback to recording if user didn't speak during gather
         r.record({
             action: `${CONFIG.BASE_URL}/music/process-search`,
             method: "POST",
             maxLength: 30,
-            playBeep: false,
-            timeout: 10,
+            playBeep: true,
+            timeout: 15,
             finishOnKey: "#"
         });
         return res.type("text/xml").send(r.toString());
@@ -182,7 +164,7 @@ router.all("/process-search", async (req, res) => {
             console.error(`[Music] ❌ Recording download error:`, e.message);
         }
 
-        const intentData = base64Audio ? await analyzeAudioIntent(base64Audio) : null;
+        const intentData = base64Audio ? await analyzeAudioIntent(base64Audio, user.settings?.model) : null;
         if (intentData && intentData.query) {
             query = intentData.query;
             isLong = intentData.intent === "music_long";

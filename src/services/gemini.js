@@ -38,24 +38,41 @@ const ROUTER_TOOL = {
     }]
 };
 
-// High-quota models (1,500 requests/day each)
-const FAST_MODELS = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"];
+// Supported Gemini Models for User Selection
+export const AVAILABLE_MODELS = [
+    { id: "gemini-2.5-flash", name: "Gemini 2.5 Flash", nameHe: "ג'מיני 2.5 פלאש" },
+    { id: "gemini-2.5-pro", name: "Gemini 2.5 Pro", nameHe: "ג'מיני 2.5 פרו" },
+    { id: "gemini-2.0-flash", name: "Gemini 2.0 Flash", nameHe: "ג'מיני 2.0 פלאש" },
+    { id: "gemini-1.5-flash", name: "Gemini 1.5 Flash", nameHe: "ג'מיני 1.5 פלאש" },
+    { id: "gemini-1.5-pro", name: "Gemini 1.5 Pro", nameHe: "ג'מיני 1.5 פרו" }
+];
 
 /**
  * Direct Audio -> Intent + Query using Gemini Multimodal Function Calling
+ * Rotates across all 3 configured Gemini API keys with multi-model fallback on 429
  */
-export async function analyzeAudioIntent(base64Audio) {
+export async function analyzeAudioIntent(base64Audio, preferredModel = "gemini-2.5-flash") {
     if (CONFIG.GEMINI_KEYS.length === 0) {
         console.warn("[Gemini] ⚠️ No GEMINI_API_KEY configured!");
         return null;
     }
 
-    console.log(`[Gemini] 🧠 Routing audio intent using Gemini...`);
+    const modelsToTry = [
+        preferredModel,
+        "gemini-2.5-flash",
+        "gemini-2.0-flash",
+        "gemini-1.5-flash",
+        "gemini-2.5-pro",
+        "gemini-1.5-pro"
+    ].filter((m, idx, arr) => m && arr.indexOf(m) === idx);
 
-    for (const key of CONFIG.GEMINI_KEYS) {
-        const genAI = new GoogleGenerativeAI(key);
+    console.log(`[Gemini] 🧠 Routing audio intent (Preferred: ${preferredModel}, ${CONFIG.GEMINI_KEYS.length} keys available)...`);
 
-        for (const modelName of FAST_MODELS) {
+    for (const modelName of modelsToTry) {
+        for (let keyIdx = 0; keyIdx < CONFIG.GEMINI_KEYS.length; keyIdx++) {
+            const key = CONFIG.GEMINI_KEYS[keyIdx];
+            const genAI = new GoogleGenerativeAI(key);
+
             try {
                 const model = genAI.getGenerativeModel({
                     model: modelName,
@@ -69,15 +86,15 @@ export async function analyzeAudioIntent(base64Audio) {
 
                 const call = result.response.functionCalls()?.[0];
                 if (call && call.name === "route_request") {
-                    console.log(`[Gemini] 🎯 Audio Intent via ${modelName}: "${call.args.intent}", Query: "${call.args.query}"`);
+                    console.log(`[Gemini] 🎯 Audio Intent via Key #${keyIdx + 1} (${modelName}): "${call.args.intent}", Query: "${call.args.query}"`);
                     return call.args;
                 }
             } catch (e) {
                 if (e.message.includes("429")) {
-                    console.warn(`[Gemini] ⚠️ Quota 429 on model ${modelName}. Trying next model...`);
-                    continue; // Try next high-quota model
+                    console.warn(`[Gemini] ⚠️ 429 Quota on Key #${keyIdx + 1} (${modelName}). Rotating to next key...`);
+                    continue;
                 }
-                console.error(`[Gemini] ❌ Router error (${modelName}):`, e.message.slice(0, 80));
+                console.error(`[Gemini] ❌ Router error (Key #${keyIdx + 1}, ${modelName}):`, e.message.slice(0, 80));
             }
         }
     }
@@ -86,23 +103,34 @@ export async function analyzeAudioIntent(base64Audio) {
 
 /**
  * Conversational Chat with Gemini (with Google Search Grounding & Persistent History)
+ * Rotates across all 3 configured Gemini API keys with multi-model fallback on 429
  */
 export async function chatWithGemini(phone, userInputText, customHistory = null) {
     const user = await getUser(phone);
     const isEn = user.settings?.language !== "he";
     const presetKey = user.settings?.system_prompt_preset || "default";
     const systemPrompt = SYSTEM_PRESETS[presetKey] || SYSTEM_PRESETS.default;
-    const preferredModel = user.settings?.model || "gemini-1.5-flash";
+    const preferredModel = user.settings?.model || "gemini-2.5-flash";
 
     await saveChatHistory(phone, "user", userInputText);
     const history = customHistory || (await getUser(phone)).chat_history || [];
 
-    const modelsToTry = [preferredModel, ...FAST_MODELS.filter(m => m !== preferredModel)];
+    const modelsToTry = [
+        preferredModel,
+        "gemini-2.5-flash",
+        "gemini-2.5-pro",
+        "gemini-2.0-flash",
+        "gemini-1.5-flash",
+        "gemini-1.5-pro"
+    ].filter((m, idx, arr) => m && arr.indexOf(m) === idx);
 
-    for (const key of CONFIG.GEMINI_KEYS) {
-        const genAI = new GoogleGenerativeAI(key);
+    console.log(`[Gemini] 💬 Chatting with model "${preferredModel}" across ${CONFIG.GEMINI_KEYS.length} keys...`);
 
-        for (const modelName of modelsToTry) {
+    for (const modelName of modelsToTry) {
+        for (let keyIdx = 0; keyIdx < CONFIG.GEMINI_KEYS.length; keyIdx++) {
+            const key = CONFIG.GEMINI_KEYS[keyIdx];
+            const genAI = new GoogleGenerativeAI(key);
+
             try {
                 const model = genAI.getGenerativeModel({
                     model: modelName,
@@ -113,19 +141,18 @@ export async function chatWithGemini(phone, userInputText, customHistory = null)
                 const prevTurns = history.slice(0, -1);
                 const chat = model.startChat({ history: prevTurns });
 
-                console.log(`[Gemini] 💬 Chatting with "${modelName}" for: "${userInputText}"`);
                 const result = await chat.sendMessage(userInputText);
                 const replyText = result.response.text().replace(/[*_#`]/g, "").trim();
 
-                console.log(`[Gemini] ✅ Reply generated from ${modelName} (${replyText.length} chars)`);
+                console.log(`[Gemini] ✅ Reply generated from Key #${keyIdx + 1} (${modelName}) (${replyText.length} chars)`);
                 await saveChatHistory(phone, "model", replyText);
                 return replyText;
             } catch (e) {
                 if (e.message.includes("429")) {
-                    console.warn(`[Gemini] ⚠️ 429 Quota on ${modelName}. Trying fallback model...`);
+                    console.warn(`[Gemini] ⚠️ 429 Quota on Key #${keyIdx + 1} (${modelName}). Rotating to next key...`);
                     continue;
                 }
-                console.error(`[Gemini] ❌ Chat error (${modelName}):`, e.message.slice(0, 80));
+                console.error(`[Gemini] ❌ Chat error (Key #${keyIdx + 1}, ${modelName}):`, e.message.slice(0, 80));
             }
         }
     }
@@ -146,9 +173,12 @@ export async function summarizeChatSoFar(phone) {
         return isEn ? "There is no conversation history to summarize yet." : "אין עדיין היסטוריית שיחה לסכם.";
     }
 
-    for (const key of CONFIG.GEMINI_KEYS) {
-        const genAI = new GoogleGenerativeAI(key);
-        for (const modelName of FAST_MODELS) {
+    const preferredModel = user.settings?.model || "gemini-2.5-flash";
+    const modelsToTry = [preferredModel, "gemini-2.0-flash", "gemini-1.5-flash"];
+
+    for (const modelName of modelsToTry) {
+        for (const key of CONFIG.GEMINI_KEYS) {
+            const genAI = new GoogleGenerativeAI(key);
             try {
                 const model = genAI.getGenerativeModel({ model: modelName });
                 const prompt = isEn
